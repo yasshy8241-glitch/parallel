@@ -1,0 +1,1964 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp, getApps } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken } from 'firebase/auth';
+import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore';
+
+// ============================================================================
+// ★ 外部環境（GitHub Pages等）で他人のデバイスと同期する場合は、
+// 以下の CUSTOM_FIREBASE_CONFIG にご自身の Firebase 設定を入力してください。
+// ============================================================================
+const CUSTOM_FIREBASE_CONFIG = null; 
+/* 例:
+const CUSTOM_FIREBASE_CONFIG = {
+  apiKey: "AIzaSy...",
+  authDomain: "your-project.firebaseapp.com",
+  projectId: "your-project",
+  storageBucket: "your-project.appspot.com",
+  messagingSenderId: "123456789",
+  appId: "1:123456789:web:abcdef"
+};
+*/
+
+const getFirebaseConfig = () => {
+  if (CUSTOM_FIREBASE_CONFIG) return CUSTOM_FIREBASE_CONFIG;
+  if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+    return typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : __firebase_config;
+  }
+  return null;
+};
+
+let app, auth, db;
+const firebaseConfig = getFirebaseConfig();
+
+if (firebaseConfig) {
+  try {
+    app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+    auth = getAuth(app);
+    db = getFirestore(app);
+  } catch (e) {
+    console.error("Firebase init error:", e);
+  }
+}
+
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'story-branch-app';
+
+// このデバイス（ブラウザタブ）固有の一時ID（共同編集時の自己更新ループ防止用）
+const CLIENT_ID = 'client_' + Math.random().toString(36).substring(2, 10);
+
+// URLパラメータ (?room=xxx) から初期ルームIDを取得
+const getInitialRoomId = () => {
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    const roomParam = params.get('room');
+    if (roomParam && roomParam.trim()) return roomParam.trim();
+  }
+  return 'default-room';
+};
+
+// LocalStorage のキー生成
+const getLocalStorageKey = (room) => `story_branch_autosave_v35_${room}`;
+
+// --- Icons (Inline SVGs for portability) ---
+const PlusIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="12" y1="5" x2="12" y2="19"></line>
+    <line x1="5" y1="12" x2="19" y2="12"></line>
+  </svg>
+);
+
+const EditIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+  </svg>
+);
+
+const TrashIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="3 6 5 6 21 6"></polyline>
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+  </svg>
+);
+
+const CopyIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+  </svg>
+);
+
+const ShareLinkIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+  </svg>
+);
+
+const ArrowUpIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="12" y1="19" x2="12" y2="5"></line>
+    <polyline points="5 12 12 5 19 12"></polyline>
+  </svg>
+);
+
+const ArrowDownIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="12" y1="5" x2="12" y2="19"></line>
+    <polyline points="19 12 12 19 5 12"></polyline>
+  </svg>
+);
+
+const ArrowLeftIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="19" y1="12" x2="5" y2="12"></line>
+    <polyline points="12 19 5 12 12 5"></polyline>
+  </svg>
+);
+
+const ArrowRightIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="5" y1="12" x2="19" y2="12"></line>
+    <polyline points="12 5 19 12 12 19"></polyline>
+  </svg>
+);
+
+const DragIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="9" cy="5" r="1"></circle><circle cx="9" cy="12" r="1"></circle><circle cx="9" cy="19" r="1"></circle><circle cx="15" cy="5" r="1"></circle><circle cx="15" cy="12" r="1"></circle><circle cx="15" cy="19" r="1"></circle>
+  </svg>
+);
+
+const DownloadIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+    <polyline points="7 10 12 15 17 10"></polyline>
+    <line x1="12" y1="15" x2="12" y2="3"></line>
+  </svg>
+);
+
+const UploadIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+    <polyline points="17 8 12 3 7 8"></polyline>
+    <line x1="12" y1="3" x2="12" y2="15"></line>
+  </svg>
+);
+
+const ImageIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+    <circle cx="8.5" cy="8.5" r="1.5"></circle>
+    <polyline points="21 15 16 10 5 21"></polyline>
+  </svg>
+);
+
+const SheetIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+    <line x1="3" y1="9" x2="21" y2="9"></line>
+    <line x1="3" y1="15" x2="21" y2="15"></line>
+    <line x1="9" y1="3" x2="9" y2="21"></line>
+    <line x1="15" y1="3" x2="15" y2="21"></line>
+  </svg>
+);
+
+// 定数・ヘルパー関数
+const MIN_CARD_WIDTH = 260;
+const PIXELS_PER_HOUR = 500;
+const GAP_Y = 80;
+const MIN_GAP_X = 60;
+const TOP_MARGIN = 110;
+
+const parseFeatures = (featuresInput) => {
+  if (Array.isArray(featuresInput)) return featuresInput;
+  if (!featuresInput) return [];
+  return String(featuresInput).split(/[,、]/).map(s => s.trim()).filter(Boolean);
+};
+
+const getNodeHeight = (node) => {
+  let baseH = 150;
+  if (node.description) baseH += Math.min(60, Math.ceil(node.description.length / 15) * 18);
+  if (node.aiWith) baseH += Math.min(90, 30 + Math.ceil(node.aiWith.length / 15) * 16);
+  if (node.aiWithout) baseH += Math.min(90, 30 + Math.ceil(node.aiWithout.length / 15) * 16);
+  const feats = parseFeatures(node.features || node.feature);
+  if (feats.length > 0) baseH += 30;
+  return Math.max(300, baseH);
+};
+
+const colorOptions = [
+  { label: 'ホワイト', value: 'bg-white' },
+  { label: 'ブルー', value: 'bg-blue-50' },
+  { label: 'アンバー', value: 'bg-amber-50' },
+  { label: 'エメラルド', value: 'bg-emerald-50' },
+  { label: 'パープル', value: 'bg-purple-50' },
+  { label: 'ローズ', value: 'bg-rose-50' },
+];
+
+const generateId = () => 'node_' + Math.random().toString(36).substr(2, 9);
+
+const timeToMinutes = (timeStr) => {
+  if (!timeStr) return 9 * 60;
+  const [h, m] = timeStr.split(':').map(Number);
+  return (h || 0) * 60 + (m || 0);
+};
+
+const minutesToTime = (totalMinutes) => {
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+};
+
+const initialTreeData = {
+  id: 'root',
+  title: 'ワークショップ開始',
+  description: '朝の身支度中。急ぎのビジネスメッセージが入る場面。',
+  features: ['AI音声入力'],
+  aiWith: '片手で声で話すだけで、PixelのAIが文脈を汲み取り適切な文章に自動補正して一瞬で送信完了。',
+  aiWithout: '片手で焦ってフリック入力し、打ち間違いの修正でタイムロス。',
+  color: 'bg-white',
+  startTime: '07:00',
+  endTime: '07:15',
+  children: [
+    {
+      id: 'branch-a',
+      title: 'ルートA：仕事編',
+      description: '会議や資料作成、急な予定調整が発生するルート。',
+      features: ['かこって検索', '先回りアシスト'],
+      aiWith: '【かこって検索】で画像内テキストを一括抽出し、チャット上の【先回りアシスト】で即予定登録。',
+      aiWithout: '画像を見ながら手動で1文字ずつ打ち直し、別アプリを開いてカレンダー手動登録。',
+      color: 'bg-blue-50',
+      startTime: '07:30',
+      endTime: '08:15',
+      children: [
+        {
+          id: 'branch-a-1',
+          title: '資料のテキスト抽出',
+          description: '画像化されたバナーや資料から文字を抜き出す場面。',
+          features: ['かこって検索'],
+          aiWith: '画面上の文字を囲むだけ。コピー不可の文字も瞬時にテキスト抽出完了。',
+          aiWithout: '画像を見ながらキーボードで手動で写し取る。打ち間違いが発生。',
+          color: 'bg-blue-50',
+          startTime: '08:30',
+          endTime: '09:15',
+          children: []
+        }
+      ]
+    },
+    {
+      id: 'branch-b',
+      title: 'ルートB：休日編',
+      description: '遊園地での思い出作りやお家での趣味の時間を楽しむルート。',
+      features: ['マジックキャプチャー', 'かこって質問'],
+      aiWith: '背景の写り込みを【マジックキャプチャー】で消去し、気になる情報を【かこって質問】で検索。',
+      aiWithout: '背景に人が写った写真をそのまま残すか断念。別アプリで手動検索。',
+      color: 'bg-amber-50',
+      startTime: '07:30',
+      endTime: '08:15',
+      children: [
+        {
+          id: 'branch-b-1',
+          title: '写真の背景整理',
+          description: '遊園地で知らない人が写り込んでしまった場面。',
+          features: ['マジックキャプチャー'],
+          aiWith: '不要な被写体をタップ・囲むだけで自然に消去。ベストな1枚が完成。',
+          aiWithout: 'スタンプで隠すか、せっかくの写真の投稿・保存をあきらめる。',
+          color: 'bg-amber-50',
+          startTime: '08:30',
+          endTime: '09:15',
+          children: []
+        }
+      ]
+    }
+  ]
+};
+
+const getAllFeaturesFromTree = (node) => {
+  if (!node) return [];
+  const current = parseFeatures(node.features || node.feature);
+  let childFeatures = [];
+  if (node.children) {
+    node.children.forEach(c => {
+      childFeatures = childFeatures.concat(getAllFeaturesFromTree(c));
+    });
+  }
+  return Array.from(new Set([...current, ...childFeatures]));
+};
+
+const getColorStroke = (colorClass) => {
+  switch (colorClass) {
+    case 'bg-blue-50': return '#93c5fd';
+    case 'bg-amber-50': return '#fcd34d';
+    case 'bg-emerald-50': return '#6ee7b7';
+    case 'bg-purple-50': return '#c084fc';
+    case 'bg-rose-50': return '#fda4af';
+    default: return '#cbd5e1';
+  }
+};
+
+// --- Tree Operation Helpers ---
+const addNodeToTree = (node, parentId, newNode) => {
+  if (node.id === parentId) {
+    return { ...node, children: [...(node.children || []), newNode] };
+  }
+  if (!node.children) return node;
+  return {
+    ...node,
+    children: node.children.map(child => addNodeToTree(child, parentId, newNode))
+  };
+};
+
+const updateNodeInTree = (node, targetId, updateData) => {
+  if (node.id === targetId) {
+    return { ...node, ...updateData };
+  }
+  if (!node.children) return node;
+  return {
+    ...node,
+    children: node.children.map(child => updateNodeInTree(child, targetId, updateData))
+  };
+};
+
+const deleteNodeFromTree = (node, targetId) => {
+  if (!node.children) return node;
+  return {
+    ...node,
+    children: node.children
+      .filter(child => child.id !== targetId)
+      .map(child => deleteNodeFromTree(child, targetId))
+  };
+};
+
+const renameFeatureInTree = (node, oldName, newName) => {
+  const currentFeats = parseFeatures(node.features || node.feature);
+  const updatedFeats = currentFeats.map(f => f === oldName ? newName : f);
+  const updatedChildren = node.children ? node.children.map(c => renameFeatureInTree(c, oldName, newName)) : [];
+  return { ...node, features: Array.from(new Set(updatedFeats)), children: updatedChildren };
+};
+
+const deleteFeatureFromTree = (node, targetName) => {
+  const currentFeats = parseFeatures(node.features || node.feature);
+  const updatedFeats = currentFeats.filter(f => f !== targetName);
+  const updatedChildren = node.children ? node.children.map(c => deleteFeatureFromTree(c, targetName)) : [];
+  return { ...node, features: updatedFeats, children: updatedChildren };
+};
+
+const pasteNodeToParent = (node, targetParentId, nodeToPaste) => {
+  const singleClonedNode = {
+    ...nodeToPaste,
+    id: generateId(),
+    title: nodeToPaste.title,
+    children: []
+  };
+
+  if (node.id === targetParentId) {
+    return {
+      ...node,
+      children: [...(node.children || []), singleClonedNode]
+    };
+  }
+  if (!node.children) return node;
+  return {
+    ...node,
+    children: node.children.map(child => pasteNodeToParent(child, targetParentId, nodeToPaste))
+  };
+};
+
+const reorderSiblingInTree = (node, targetId, direction) => {
+  if (!node.children) return node;
+  const idx = node.children.findIndex(c => c.id === targetId);
+  if (idx !== -1) {
+    const newIdx = idx + direction;
+    if (newIdx >= 0 && newIdx < node.children.length) {
+      const newChildren = [...node.children];
+      const [moved] = newChildren.splice(idx, 1);
+      newChildren.splice(newIdx, 0, moved);
+      return { ...node, children: newChildren };
+    }
+    return node;
+  }
+  return {
+    ...node,
+    children: node.children.map(c => reorderSiblingInTree(c, targetId, direction))
+  };
+};
+
+const promoteNodeInTree = (root, targetId) => {
+  const findParentAndChild = (current, parent = null) => {
+    if (current.id === targetId) return { parent, child: current };
+    if (!current.children) return null;
+    for (const c of current.children) {
+      const res = findParentAndChild(c, current);
+      if (res) return res;
+    }
+    return null;
+  };
+
+  const found = findParentAndChild(root);
+  if (!found || !found.parent || found.parent.id === root.id) return root;
+
+  const { parent: targetParent, child: targetNode } = found;
+
+  const findGrandParent = (current, pId) => {
+    if (!current.children) return null;
+    if (current.children.some(c => c.id === pId)) return current;
+    for (const c of current.children) {
+      const res = findGrandParent(c, pId);
+      if (res) return res;
+    }
+    return null;
+  };
+
+  const grandParent = findGrandParent(root, targetParent.id);
+  if (!grandParent) return root;
+
+  const removeFromParent = (n) => {
+    if (n.id === targetParent.id) {
+      return { ...n, children: n.children.filter(c => c.id !== targetId) };
+    }
+    if (!n.children) return n;
+    return { ...n, children: n.children.map(removeFromParent) };
+  };
+
+  const updatedTree = removeFromParent(root);
+
+  const insertIntoGrandParent = (n) => {
+    if (n.id === grandParent.id) {
+      const pIdx = n.children.findIndex(c => c.id === targetParent.id);
+      const newChildren = [...n.children];
+      newChildren.splice(pIdx + 1, 0, targetNode);
+      return { ...n, children: newChildren };
+    }
+    if (!n.children) return n;
+    return { ...n, children: n.children.map(insertIntoGrandParent) };
+  };
+
+  return insertIntoGrandParent(updatedTree);
+};
+
+const demoteNodeInTree = (root, targetId) => {
+  const findParentAndSiblings = (current) => {
+    if (!current.children) return null;
+    const idx = current.children.findIndex(c => c.id === targetId);
+    if (idx !== -1) return { parent: current, index: idx };
+    for (const c of current.children) {
+      const res = findParentAndSiblings(c);
+      if (res) return res;
+    }
+    return null;
+  };
+
+  const found = findParentAndSiblings(root);
+  if (!found || found.index === 0) return root;
+
+  const { parent, index } = found;
+  const targetNode = parent.children[index];
+  const prevSibling = parent.children[index - 1];
+
+  const updateTree = (n) => {
+    if (n.id === parent.id) {
+      const newChildren = n.children.filter(c => c.id !== targetId).map(c => {
+        if (c.id === prevSibling.id) {
+          return {
+            ...c,
+            children: [...(c.children || []), targetNode]
+          };
+        }
+        return c;
+      });
+      return { ...n, children: newChildren };
+    }
+    if (!n.children) return n;
+    return { ...n, children: n.children.map(updateTree) };
+  };
+
+  return updateTree(root);
+};
+
+// --- Tree Layout Computation ---
+const computeTreeLayout = (tree, timelineStartHour = 0) => {
+  const nodes = [];
+  const links = [];
+
+  const computeHeight = (n) => {
+    n._nodeH = getNodeHeight(n);
+    if (!n.children || n.children.length === 0) {
+      n._h = n._nodeH + GAP_Y;
+    } else {
+      n._h = n.children.reduce((sum, child) => sum + computeHeight(child), 0);
+      n._h = Math.max(n._h, n._nodeH + GAP_Y);
+    }
+    return n._h;
+  };
+  computeHeight(tree);
+
+  const assignCoords = (n, currentY, minX = 60) => {
+    const startMin = timeToMinutes(n.startTime || '09:00');
+    const endMin = timeToMinutes(n.endTime || '09:30');
+    const durationMin = Math.max(15, endMin - startMin);
+
+    const timeBasedX = ((startMin - timelineStartHour * 60) / 60) * PIXELS_PER_HOUR + 60;
+    n._x = Math.max(timeBasedX, minX);
+    n._width = Math.max(MIN_CARD_WIDTH, (durationMin / 60) * PIXELS_PER_HOUR);
+
+    let childY = currentY;
+    const parentRightX = n._x + n._width;
+
+    if (n.children && n.children.length > 0) {
+      n.children.forEach(child => {
+        assignCoords(child, childY, parentRightX + MIN_GAP_X);
+        childY += child._h;
+      });
+      const firstChild = n.children[0];
+      const lastChild = n.children[n.children.length - 1];
+      n._y = (firstChild._y + lastChild._y) / 2;
+    } else {
+      n._y = currentY + (n._nodeH / 2);
+    }
+    
+    nodes.push(n);
+
+    if (n.children) {
+      n.children.forEach(child => {
+        links.push({
+          id: `${n.id}-${child.id}`,
+          startX: parentRightX,
+          startY: n._y,
+          endX: child._x,
+          endY: child._y,
+          colorClass: child.color || 'bg-white'
+        });
+      });
+    }
+  };
+
+  assignCoords(tree, TOP_MARGIN, 60);
+
+  const maxY = Math.max(...nodes.map(n => n._y + (n._nodeH || 300) / 2), 850);
+  return { nodes, links, totalHeight: maxY + GAP_Y };
+};
+
+export default function StoryManager() {
+  const initialRoom = getInitialRoomId();
+  const [treeData, setTreeData] = useState(null);
+  const [timelineStartHour, setTimelineStartHour] = useState(0);
+  const [timelineEndHour, setTimelineEndHour] = useState(24);
+  const [zoom, setZoom] = useState(1.0);
+  const [roomId, setRoomId] = useState(initialRoom);
+  const [inputRoomId, setInputRoomId] = useState(initialRoom);
+  const [isRoomModalOpen, setIsRoomModalOpen] = useState(false);
+  const [syncStatus, setSyncStatus] = useState('syncing'); // 'syncing' | 'saving' | 'synced' | 'local'
+  const [lastSavedText, setLastSavedText] = useState('');
+  const [toastMessage, setToastMessage] = useState('');
+  const [copiedNode, setCopiedNode] = useState(null);
+  const [featureTab, setFeatureTab] = useState('registered');
+  const [editingFeatureName, setEditingFeatureName] = useState(null);
+  const [newFeatureNameInput, setNewFeatureNameInput] = useState('');
+
+  const [modalState, setModalState] = useState({ isOpen: false, type: '', targetNodeId: null });
+  const [formData, setFormData] = useState({ 
+    title: '', 
+    description: '', 
+    features: [], 
+    newFeatureText: '',
+    aiWith: '',
+    aiWithout: '',
+    color: 'bg-white', 
+    startTime: '09:00',
+    endTime: '09:30'
+  });
+  const [dragState, setDragState] = useState(null);
+  const mainScrollRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const syncTimeoutRef = useRef(null);
+
+  const handleZoomIn = () => setZoom(prev => Math.min(1.5, Math.round((prev + 0.1) * 10) / 10));
+  const handleZoomOut = () => setZoom(prev => Math.max(0.5, Math.round((prev - 0.1) * 10) / 10));
+
+  const showToast = (msg) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(''), 2500);
+  };
+
+  const formatCurrentTime = () => {
+    const now = new Date();
+    return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+  };
+
+  // ローカルストレージへの即時自動保存
+  const saveToLocalStorage = (targetRoom, nextTree, nextStart, nextEnd) => {
+    try {
+      const payload = {
+        treeData: nextTree,
+        timelineStartHour: nextStart,
+        timelineEndHour: nextEnd,
+        updatedAt: Date.now()
+      };
+      localStorage.setItem(getLocalStorageKey(targetRoom), JSON.stringify(payload));
+      setLastSavedText(formatCurrentTime());
+    } catch (e) {
+      console.warn("LocalStorage save error:", e);
+    }
+  };
+
+  // ローカルストレージからの読み込み
+  const loadFromLocalStorage = (targetRoom) => {
+    try {
+      const raw = localStorage.getItem(getLocalStorageKey(targetRoom));
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (e) {
+      return null;
+    }
+  };
+
+  // URLのクエリパラメータ (?room=xxx) を履歴を汚さずに同期更新
+  const updateUrlRoomParam = (newRoom) => {
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.set('room', newRoom);
+      window.history.replaceState({}, '', url.toString());
+    }
+  };
+
+  // 共有リンクをクリップボードにコピー
+  const handleCopyShareLink = () => {
+    if (typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    url.searchParams.set('room', roomId);
+    navigator.clipboard.writeText(url.toString()).then(() => {
+      showToast(`共有リンクをコピーしました（合言葉: ${roomId}）`);
+    }).catch(() => {
+      showToast('URLのコピーに失敗しました');
+    });
+  };
+
+  // スプレッドシート用 CSV 出力
+  const handleExportCSV = () => {
+    if (!treeData) return;
+    const rows = [
+      ['階層パス', '分岐タイトル', '開始時間', '終了時間', '概要・シチュエーション', '活用機能', '🟢 AIあり(〇〇さん)', '🔴 AIなし(××さん)']
+    ];
+
+    const traverse = (node, parentPath = '') => {
+      const currentPath = parentPath ? `${parentPath} > ${node.title}` : node.title;
+      const feats = parseFeatures(node.features || node.feature).join(', ');
+      rows.push([
+        `"${currentPath.replace(/"/g, '""')}"`,
+        `"${(node.title || '').replace(/"/g, '""')}"`,
+        `"${node.startTime || ''}"`,
+        `"${node.endTime || ''}"`,
+        `"${(node.description || '').replace(/"/g, '""')}"`,
+        `"${feats.replace(/"/g, '""')}"`,
+        `"${(node.aiWith || '').replace(/"/g, '""')}"`,
+        `"${(node.aiWithout || '').replace(/"/g, '""')}"`
+      ]);
+      if (node.children) {
+        node.children.forEach(child => traverse(child, currentPath));
+      }
+    };
+
+    traverse(treeData);
+
+    const csvContent = '\uFEFF' + rows.map(r => r.join(',')).join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `story_flowchart_${roomId}_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    showToast('スプレッドシート用CSVファイルを出力しました。');
+  };
+
+  // フローチャートの画像 (PNG) 出力
+  const handleExportImage = () => {
+    if (!treeData) return;
+    const layout = computeTreeLayout(treeData, timelineStartHour);
+    const totalHours = Math.max(1, timelineEndHour - timelineStartHour);
+    const width = totalHours * PIXELS_PER_HOUR + 120;
+    const height = Math.max(850, layout.totalHeight);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width * 2;
+    canvas.height = height * 2;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(2, 2);
+
+    ctx.fillStyle = '#f1f5f9';
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, 40);
+    ctx.strokeStyle = '#e2e8f0';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, 40);
+    ctx.lineTo(width, 40);
+    ctx.stroke();
+
+    ctx.fillStyle = '#64748b';
+    ctx.font = 'bold 12px sans-serif';
+    for (let idx = 0; idx <= totalHours; idx++) {
+      const hour = timelineStartHour + idx;
+      const x = idx * PIXELS_PER_HOUR + 60;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, 40);
+      ctx.stroke();
+      ctx.fillText(`${String(hour).padStart(2, '0')}:00`, x + 6, 26);
+    }
+
+    layout.links.forEach(link => {
+      const controlX1 = link.startX + Math.max(30, (link.endX - link.startX) / 2);
+      const controlX2 = link.endX - Math.max(30, (link.endX - link.startX) / 2);
+
+      ctx.beginPath();
+      ctx.moveTo(link.startX, link.startY);
+      ctx.bezierCurveTo(controlX1, link.startY, controlX2, link.endY, link.endX, link.endY);
+      ctx.strokeStyle = getColorStroke(link.colorClass);
+      ctx.lineWidth = 4;
+      ctx.stroke();
+    });
+
+    layout.nodes.forEach(node => {
+      const x = node._x;
+      const h = getNodeHeight(node);
+      const y = node._y - (h / 2);
+      const w = node._width;
+
+      ctx.fillStyle = '#ffffff';
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.05)';
+      ctx.shadowBlur = 8;
+      ctx.shadowOffsetY = 2;
+
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, 16);
+      ctx.fill();
+      ctx.shadowColor = 'transparent';
+
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.fillStyle = '#1e293b';
+      ctx.font = 'bold 13px sans-serif';
+      if (node.title.length > 14) {
+        ctx.fillText(node.title.slice(0, 14), x + 12, y + 20);
+        ctx.fillText(node.title.slice(14, 28) + (node.title.length > 28 ? '...' : ''), x + 12, y + 36);
+      } else {
+        ctx.fillText(node.title, x + 12, y + 26);
+      }
+
+      ctx.fillStyle = '#e2e8f0';
+      ctx.beginPath();
+      ctx.roundRect(x + w - 85, y + 12, 75, 18, 4);
+      ctx.fill();
+      ctx.fillStyle = '#334155';
+      ctx.font = 'bold 10px monospace';
+      ctx.fillText(`${node.startTime || '09:00'}-${node.endTime || '09:30'}`, x + w - 80, y + 25);
+
+      if (node.description) {
+        ctx.fillStyle = '#475569';
+        ctx.font = '10px sans-serif';
+        ctx.fillText(node.description.slice(0, 24), x + 12, y + 50);
+      }
+
+      const feats = parseFeatures(node.features || node.feature);
+      let tagX = x + 12;
+      feats.forEach(f => {
+        ctx.fillStyle = '#e0e7ff';
+        const tw = ctx.measureText(f).width + 12;
+        ctx.beginPath();
+        ctx.roundRect(tagX, y + h - 28, tw, 16, 4);
+        ctx.fill();
+        ctx.fillStyle = '#4338ca';
+        ctx.font = 'bold 9px sans-serif';
+        ctx.fillText(f, tagX + 6, y + h - 16);
+        tagX += tw + 4;
+      });
+    });
+
+    const image = canvas.toDataURL('image/png');
+    const link = document.createElement('a');
+    link.href = image;
+    link.setAttribute('download', `story_flowchart_${roomId}_${new Date().toISOString().slice(0, 10)}.png`);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    showToast('フローチャートを画像 (PNG) として出力しました。');
+  };
+
+  const handleExportJSON = () => {
+    if (!treeData) return;
+    const exportObject = {
+      version: '3.5',
+      roomId,
+      timelineStartHour,
+      timelineEndHour,
+      treeData
+    };
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(exportObject, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", `story_branch_${roomId}_${new Date().toISOString().slice(0,10)}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+    showToast('JSONファイルとして保存しました。');
+  };
+
+  const handleImportJSON = (e) => {
+    const fileReader = new FileReader();
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    fileReader.readAsText(file, "UTF-8");
+    fileReader.onload = (event) => {
+      try {
+        const parsed = JSON.parse(event.target.result);
+        if (parsed.treeData) {
+          setTreeData(parsed.treeData);
+          let nextStart = timelineStartHour;
+          let nextEnd = timelineEndHour;
+          if (parsed.timelineStartHour !== undefined) {
+             setTimelineStartHour(parsed.timelineStartHour);
+             nextStart = parsed.timelineStartHour;
+          }
+          if (parsed.timelineEndHour !== undefined) {
+             setTimelineEndHour(parsed.timelineEndHour);
+             nextEnd = parsed.timelineEndHour;
+          }
+          syncToCloudAndLocal(parsed.treeData, nextStart, nextEnd);
+          showToast('保存ファイルからデータを復元・自動保存しました。');
+        } else if (parsed.id && parsed.title) {
+          setTreeData(parsed);
+          syncToCloudAndLocal(parsed, timelineStartHour, timelineEndHour);
+          showToast('データを復元・自動保存しました。');
+        } else {
+          showToast('無効なファイル形式です。');
+        }
+      } catch (err) {
+        showToast('ファイルの読み込みに失敗しました。');
+      }
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+  };
+
+  // ルーム接続 & リアルタイム同期監視
+  useEffect(() => {
+    const roomKey = roomId.trim() || 'default-room';
+    updateUrlRoomParam(roomKey);
+
+    // 1. まずローカルストレージに保存されたデータがあれば即座に復元（オフライン耐性）
+    const cached = loadFromLocalStorage(roomKey);
+    if (cached && cached.treeData) {
+      setTreeData(cached.treeData);
+      if (cached.timelineStartHour !== undefined) setTimelineStartHour(cached.timelineStartHour);
+      if (cached.timelineEndHour !== undefined) setTimelineEndHour(cached.timelineEndHour);
+    }
+
+    if (!db) {
+      if (!cached) {
+        setTreeData(initialTreeData);
+        saveToLocalStorage(roomKey, initialTreeData, 0, 24);
+      }
+      setSyncStatus('local');
+      return;
+    }
+
+    let unsubscribe = () => {};
+    setSyncStatus('syncing');
+
+    const connectAndListen = async () => {
+      try {
+        if (auth && !auth.currentUser) {
+          try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+              await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+              await signInAnonymously(auth);
+            }
+          } catch (e) {
+            console.warn("Auth fallback handling:", e);
+          }
+        }
+
+        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'story_branches', roomKey);
+
+        unsubscribe = onSnapshot(docRef, (snapshot) => {
+          if (snapshot.exists()) {
+            const data = snapshot.data();
+            // 他のデバイスからの更新、または初回読み込み時に反映
+            if (data.updatedBy !== CLIENT_ID || !treeData) {
+              if (data.treeData) setTreeData(data.treeData);
+              if (data.timelineStartHour !== undefined) setTimelineStartHour(data.timelineStartHour);
+              if (data.timelineEndHour !== undefined) setTimelineEndHour(data.timelineEndHour);
+              saveToLocalStorage(roomKey, data.treeData || initialTreeData, data.timelineStartHour ?? 0, data.timelineEndHour ?? 24);
+            }
+            setSyncStatus('synced');
+          } else {
+            const seedTree = cached?.treeData || initialTreeData;
+            const seedStart = cached?.timelineStartHour ?? 0;
+            const seedEnd = cached?.timelineEndHour ?? 24;
+            setDoc(docRef, {
+              treeData: seedTree,
+              timelineStartHour: seedStart,
+              timelineEndHour: seedEnd,
+              updatedAt: Date.now(),
+              updatedBy: CLIENT_ID
+            }).catch(e => console.warn("Doc init warn:", e));
+            setTreeData(seedTree);
+            saveToLocalStorage(roomKey, seedTree, seedStart, seedEnd);
+            setSyncStatus('synced');
+          }
+        }, (error) => {
+          console.warn("Snapshot error:", error);
+          setSyncStatus('local');
+          setTreeData(prev => prev || cached?.treeData || initialTreeData);
+        });
+      } catch (err) {
+        console.warn("Connect error:", err);
+        setSyncStatus('local');
+        setTreeData(prev => prev || cached?.treeData || initialTreeData);
+      }
+    };
+
+    connectAndListen();
+
+    return () => unsubscribe();
+  }, [roomId]);
+
+  // 自動保存（LocalStorage即時 + Firestoreデバウンス）
+  const syncToCloudAndLocal = (nextTree, nextStart, nextEnd) => {
+    const roomKey = roomId.trim() || 'default-room';
+    saveToLocalStorage(roomKey, nextTree, nextStart, nextEnd);
+
+    if (!db) return;
+    setSyncStatus('saving');
+    if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+    syncTimeoutRef.current = setTimeout(() => {
+      try {
+        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'story_branches', roomKey);
+        setDoc(docRef, {
+          treeData: nextTree,
+          timelineStartHour: nextStart,
+          timelineEndHour: nextEnd,
+          updatedAt: Date.now(),
+          updatedBy: CLIENT_ID
+        }).then(() => {
+          setSyncStatus('synced');
+          setLastSavedText(formatCurrentTime());
+        }).catch(err => {
+          console.warn("Cloud save warning:", err.message);
+          setSyncStatus('local');
+        });
+      } catch (e) {
+        console.warn("Cloud save skipped:", e);
+        setSyncStatus('local');
+      }
+    }, 300);
+  };
+
+  const dispatchTreeUpdate = (updater) => {
+    setTreeData(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      syncToCloudAndLocal(next, timelineStartHour, timelineEndHour);
+      return next;
+    });
+  };
+
+  // 編集モーダル内でフォームが変更されたら即座にツリーと自動保存へ反映するヘルパー
+  const updateFormAndAutoSave = (updatedFields) => {
+    setFormData(prevForm => {
+      const nextForm = { ...prevForm, ...updatedFields };
+      if (modalState.isOpen && modalState.type === 'edit' && modalState.targetNodeId) {
+        dispatchTreeUpdate(prevTree => updateNodeInTree(prevTree, modalState.targetNodeId, {
+          title: nextForm.title || '無題の分岐',
+          description: nextForm.description,
+          features: nextForm.features,
+          aiWith: nextForm.aiWith,
+          aiWithout: nextForm.aiWithout,
+          color: nextForm.color,
+          startTime: nextForm.startTime,
+          endTime: nextForm.endTime
+        }));
+      }
+      return nextForm;
+    });
+  };
+
+  // 「分岐を追加」押下時に即座にノードを作成し、リアルタイム自動保存モードで編集モーダルを開く
+  const handleAddClick = (parentNode) => {
+    const newId = generateId();
+    const defaultStart = parentNode.endTime || '09:30';
+    const defaultEnd = minutesToTime(timeToMinutes(defaultStart) + 30);
+    const newNode = {
+      id: newId,
+      title: '新しい分岐',
+      description: '',
+      features: [],
+      aiWith: '',
+      aiWithout: '',
+      color: parentNode.color || 'bg-white',
+      startTime: defaultStart,
+      endTime: defaultEnd,
+      children: []
+    };
+
+    dispatchTreeUpdate(prev => addNodeToTree(prev, parentNode.id, newNode));
+
+    setFormData({
+      title: newNode.title,
+      description: '',
+      features: [],
+      newFeatureText: '',
+      aiWith: '',
+      aiWithout: '',
+      color: newNode.color,
+      startTime: defaultStart,
+      endTime: defaultEnd
+    });
+    setFeatureTab('registered');
+    setModalState({ isOpen: true, type: 'edit', targetNodeId: newId });
+  };
+
+  const handleEditClick = (node) => {
+    const currentFeatures = parseFeatures(node.features || node.feature);
+    setFormData({
+      title: node.title,
+      description: node.description || '',
+      features: currentFeatures,
+      newFeatureText: '',
+      aiWith: node.aiWith || '',
+      aiWithout: node.aiWithout || '',
+      color: node.color || 'bg-white',
+      startTime: node.startTime || '09:00',
+      endTime: node.endTime || '09:30'
+    });
+    setFeatureTab('registered');
+    setModalState({ isOpen: true, type: 'edit', targetNodeId: node.id });
+  };
+
+  const handleDeleteClick = (nodeId) => {
+    setModalState({ isOpen: true, type: 'delete', targetNodeId: nodeId });
+  };
+
+  const handleConfirmDelete = () => {
+    if (modalState.targetNodeId) {
+      dispatchTreeUpdate(prev => deleteNodeFromTree(prev, modalState.targetNodeId));
+      showToast('分岐を削除しました（自動保存済み）');
+    }
+    closeModal();
+  };
+
+  const handleCopyNode = (node) => {
+    setCopiedNode(node);
+    showToast(`「${node.title}」をコピーしました。任意の分岐に貼り付けできます。`);
+  };
+
+  const handlePasteNode = (targetParentNode) => {
+    if (!copiedNode) return;
+    dispatchTreeUpdate(prev => pasteNodeToParent(prev, targetParentNode.id, copiedNode));
+    showToast(`「${copiedNode.title}」を「${targetParentNode.title}」の配下に複製しました。`);
+  };
+
+  const handleReorderClick = (nodeId, dir) => {
+    dispatchTreeUpdate(prev => reorderSiblingInTree(prev, nodeId, dir));
+  };
+
+  const handlePromoteClick = (nodeId) => {
+    dispatchTreeUpdate(prev => promoteNodeInTree(prev, nodeId));
+  };
+
+  const handleDemoteClick = (nodeId) => {
+    dispatchTreeUpdate(prev => demoteNodeInTree(prev, nodeId));
+  };
+
+  const scrollHorizontal = (offset) => {
+    if (mainScrollRef.current) {
+      mainScrollRef.current.scrollBy({ left: offset, behavior: 'smooth' });
+    }
+  };
+
+  const handlePointerDown = (e, node) => {
+    if (e.target.closest('button') || e.target.closest('input')) return;
+    e.target.setPointerCapture(e.pointerId);
+    
+    const startMin = timeToMinutes(node.startTime || '09:00');
+    const endMin = timeToMinutes(node.endTime || '09:30');
+    
+    setDragState({ 
+      id: node.id, 
+      startX: e.clientX, 
+      origStartMin: startMin,
+      origDuration: endMin - startMin
+    });
+  };
+
+  const handlePointerMove = (e) => {
+    if (!dragState) return;
+    const deltaX = (e.clientX - dragState.startX) / zoom;
+    const rawDeltaMinutes = (deltaX / PIXELS_PER_HOUR) * 60;
+    const deltaMinutes = Math.round(rawDeltaMinutes / 15) * 15;
+    
+    let newStartMin = dragState.origStartMin + deltaMinutes;
+    newStartMin = Math.max(0, Math.min(24 * 60 - dragState.origDuration, newStartMin));
+    newStartMin = Math.round(newStartMin / 15) * 15;
+    const newEndMin = newStartMin + dragState.origDuration;
+
+    dispatchTreeUpdate(prev => updateNodeInTree(prev, dragState.id, { 
+      startTime: minutesToTime(newStartMin), 
+      endTime: minutesToTime(newEndMin) 
+    }));
+  };
+
+  const handlePointerUp = (e) => {
+    if (dragState) {
+      e.target.releasePointerCapture(e.pointerId);
+      setDragState(null);
+    }
+  };
+
+  const closeModal = () => {
+    setModalState({ isOpen: false, type: '', targetNodeId: null });
+  };
+
+  if (!treeData) return <div className="p-8 text-center text-slate-500">読み込み中...</div>;
+
+  const layout = computeTreeLayout(treeData, timelineStartHour);
+  const totalHours = Math.max(1, timelineEndHour - timelineStartHour);
+  const canvasWidth = totalHours * PIXELS_PER_HOUR + 120;
+  const registeredFeatures = getAllFeaturesFromTree(treeData);
+
+  return (
+    <div className="h-screen w-screen max-h-screen max-w-screen bg-slate-100 flex flex-col font-sans overflow-hidden">
+      <input 
+        type="file" 
+        ref={fileInputRef} 
+        onChange={handleImportJSON} 
+        accept=".json" 
+        className="hidden" 
+      />
+
+      {/* Top Header */}
+      <header className="bg-white border-b border-slate-200 px-4 py-3 sm:px-6 sm:py-3.5 flex flex-wrap items-center justify-between gap-3 shrink-0 shadow-sm z-40 relative">
+        <div>
+          <h1 className="text-base sm:text-lg font-extrabold text-slate-800 tracking-tight flex items-center gap-2">
+            Story Branch Manager
+            <span className="text-[10px] font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">v3.5 AutoSave</span>
+          </h1>
+          <div className="text-[11px] text-slate-500 mt-1 flex flex-wrap items-center gap-2">
+            {/* 同期ステータス＆ルーム変更ボタン */}
+            {syncStatus === 'synced' ? (
+              <button 
+                onClick={() => {
+                  setInputRoomId(roomId);
+                  setIsRoomModalOpen(true);
+                }}
+                className="text-emerald-700 font-bold bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded flex items-center gap-1.5 transition-colors"
+                title="クリックして合言葉（ルームID）を変更"
+              >
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span>リアルタイム同期中 (合言葉: {roomId})</span>
+              </button>
+            ) : syncStatus === 'saving' ? (
+              <span className="text-blue-700 font-bold bg-blue-50 border border-blue-200 px-2 py-0.5 rounded flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-blue-500 animate-ping"></span>
+                <span>自動保存中...</span>
+              </span>
+            ) : syncStatus === 'syncing' ? (
+              <span className="text-amber-600 font-bold bg-amber-50 px-2 py-0.5 rounded">● 同期接続中...</span>
+            ) : (
+              <button 
+                onClick={() => {
+                  setInputRoomId(roomId);
+                  setIsRoomModalOpen(true);
+                }}
+                className="text-slate-700 font-bold bg-slate-100 hover:bg-slate-200 border border-slate-300 px-2 py-0.5 rounded flex items-center gap-1 transition-colors"
+              >
+                <span>💾 端末に自動保存中 (合言葉: {roomId})</span>
+              </button>
+            )}
+
+            {/* 他の人のデバイスへ送る共有URLコピーボタン */}
+            <button
+              onClick={handleCopyShareLink}
+              className="text-indigo-700 font-bold bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2 py-0.5 rounded flex items-center gap-1 transition-colors"
+              title="他の人のスマホ・PCと同期するためのURLをコピー"
+            >
+              <ShareLinkIcon />
+              <span>共有URLをコピー</span>
+            </button>
+
+            {lastSavedText && (
+              <span className="text-[10px] text-slate-400 font-mono">
+                最終自動保存: {lastSavedText}
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {/* 画像保存 & 出力ボタン */}
+          <button
+            onClick={handleExportImage}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 shadow-sm transition-all"
+            title="フローチャート全体を画像 (PNG) として出力"
+          >
+            <ImageIcon />
+            <span>画像保存</span>
+          </button>
+
+          <button
+            onClick={handleExportCSV}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-lg text-xs font-bold text-emerald-800 shadow-sm transition-all"
+            title="Excel/スプレッドシート用ファイルとして出力"
+          >
+            <SheetIcon />
+            <span>スプレッドシート</span>
+          </button>
+
+          <button
+            onClick={handleExportJSON}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 shadow-sm transition-all"
+            title="PCやスマホにバックアップ保存"
+          >
+            <DownloadIcon />
+            <span>JSON保存</span>
+          </button>
+
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 shadow-sm transition-all"
+            title="保存したJSONファイルを読み込む"
+          >
+            <UploadIcon />
+            <span>開く</span>
+          </button>
+
+          {/* ズーム コントローラー */}
+          <div className="flex items-center bg-slate-100 border border-slate-300 rounded-lg p-0.5">
+            <button
+              onClick={handleZoomOut}
+              className="px-2 py-1 text-xs font-bold text-slate-600 hover:bg-white rounded transition-colors"
+              title="縮小"
+            >
+              🔍-
+            </button>
+            <span className="px-2 text-xs font-mono font-bold text-slate-700">
+              {Math.round(zoom * 100)}%
+            </span>
+            <button
+              onClick={handleZoomIn}
+              className="px-2 py-1 text-xs font-bold text-slate-600 hover:bg-white rounded transition-colors"
+              title="拡大"
+            >
+              🔍+
+            </button>
+          </div>
+
+          {/* タイムライン開始/終了時間の範囲選択 */}
+          <div className="flex items-center gap-1 text-xs bg-slate-50 border border-slate-300 px-2 py-1 rounded-lg">
+            <span className="text-slate-500 font-semibold hidden sm:inline">表示範囲:</span>
+            <select
+              value={timelineStartHour}
+              onChange={(e) => {
+                const newStart = Number(e.target.value);
+                setTimelineStartHour(newStart);
+                syncToCloudAndLocal(treeData, newStart, timelineEndHour);
+              }}
+              className="bg-transparent font-mono font-bold text-slate-700 focus:outline-none cursor-pointer"
+            >
+              {Array.from({ length: 24 }).map((_, i) => (
+                <option key={i} value={i} disabled={i >= timelineEndHour}>
+                  {String(i).padStart(2, '0')}:00
+                </option>
+              ))}
+            </select>
+            <span className="text-slate-400">〜</span>
+            <select
+              value={timelineEndHour}
+              onChange={(e) => {
+                const newEnd = Number(e.target.value);
+                setTimelineEndHour(newEnd);
+                syncToCloudAndLocal(treeData, timelineStartHour, newEnd);
+              }}
+              className="bg-transparent font-mono font-bold text-slate-700 focus:outline-none cursor-pointer"
+            >
+              {Array.from({ length: 25 }).map((_, i) => (
+                <option key={i} value={i} disabled={i <= timelineStartHour}>
+                  {String(i).padStart(2, '0')}:00
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            onClick={() => {
+              setTimelineStartHour(0);
+              setTimelineEndHour(24);
+              setTreeData(initialTreeData);
+              syncToCloudAndLocal(initialTreeData, 0, 24);
+              showToast('初期状態にリセットしました。');
+            }}
+            className="text-xs text-slate-500 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-md transition-colors font-medium"
+          >
+            初期化
+          </button>
+        </div>
+      </header>
+
+      {/* 通知トースト */}
+      {toastMessage && (
+        <div className="fixed top-16 right-6 bg-slate-800 text-white text-xs px-4 py-2 rounded-lg shadow-xl z-50 animate-in fade-in slide-in-from-top-2 duration-200 flex items-center gap-2">
+          <span>{toastMessage}</span>
+        </div>
+      )}
+
+      {/* Main Canvas / Scrollable View */}
+      <div 
+        ref={mainScrollRef} 
+        className="flex-1 min-h-0 min-w-0 overflow-auto relative select-none"
+      >
+        <div 
+          className="relative origin-top-left transition-transform duration-75"
+          style={{ 
+            width: `${canvasWidth}px`, 
+            height: `${layout.totalHeight}px`,
+            transform: `scale(${zoom})`,
+            transformOrigin: '0 0'
+          }}
+        >
+          {/* タイムライン時間軸ルーラー */}
+          <div className="sticky top-0 left-0 w-full bg-white/90 backdrop-blur-md border-b border-slate-200 z-30 flex items-center h-10 shadow-xs">
+            {Array.from({ length: totalHours + 1 }).map((_, idx) => {
+              const hour = timelineStartHour + idx;
+              const posX = idx * PIXELS_PER_HOUR + 60;
+              return (
+                <div 
+                  key={hour} 
+                  className="absolute border-l border-slate-300 h-full flex items-center pl-1.5"
+                  style={{ left: `${posX}px` }}
+                >
+                  <span className="text-xs font-mono font-bold text-slate-600">
+                    {String(hour).padStart(2, '0')}:00
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* 背景グリッド線 */}
+          <div className="absolute inset-0 pointer-events-none">
+            {Array.from({ length: totalHours + 1 }).map((_, idx) => {
+              const posX = idx * PIXELS_PER_HOUR + 60;
+              return (
+                <div 
+                  key={idx} 
+                  className="absolute top-0 bottom-0 border-l border-slate-200/60"
+                  style={{ left: `${posX}px` }}
+                />
+              );
+            })}
+          </div>
+
+          {/* S字曲線（接続線）のSVGレイヤー */}
+          <svg className="absolute inset-0 w-full h-full pointer-events-none z-10">
+            {layout.links.map(link => {
+              const controlX1 = link.startX + Math.max(30, (link.endX - link.startX) / 2);
+              const controlX2 = link.endX - Math.max(30, (link.endX - link.startX) / 2);
+              const pathD = `M ${link.startX} ${link.startY} C ${controlX1} ${link.startY}, ${controlX2} ${link.endY}, ${link.endX} ${link.endY}`;
+
+              return (
+                <g key={link.id}>
+                  <path
+                    d={pathD}
+                    fill="none"
+                    stroke={getColorStroke(link.colorClass)}
+                    strokeWidth="4"
+                    strokeLinecap="round"
+                    className="transition-all duration-300"
+                  />
+                  <path
+                    d={pathD}
+                    fill="none"
+                    stroke="#ffffff"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeDasharray="4 4"
+                    className="opacity-60"
+                  />
+                </g>
+              );
+            })}
+          </svg>
+
+          {/* 分岐カード（ノード）群 */}
+          {layout.nodes.map(node => {
+            const currentFeatures = parseFeatures(node.features || node.feature);
+            const isDragging = dragState?.id === node.id;
+            const h = getNodeHeight(node);
+
+            return (
+              <div
+                key={node.id}
+                onPointerDown={(e) => handlePointerDown(e, node)}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                className={`absolute z-20 rounded-2xl border shadow-sm flex flex-col justify-between p-3.5 transition-shadow cursor-grab active:cursor-grabbing ${node.color || 'bg-white'} ${
+                  isDragging ? 'shadow-2xl ring-2 ring-blue-500 z-40' : 'hover:shadow-md hover:border-slate-300'
+                }`}
+                style={{
+                  left: `${node._x}px`,
+                  top: `${node._y - (h / 2)}px`,
+                  width: `${node._width}px`,
+                  height: `${h}px`,
+                  touchAction: 'none'
+                }}
+              >
+                <div>
+                  {/* ヘッダー・タイトル・時間表示 */}
+                  <div className="flex items-start justify-between gap-1.5 pb-2 border-b border-slate-900/10">
+                    <div className="flex items-start gap-1.5 min-w-0 flex-1">
+                      <span className="text-slate-400 mt-0.5 shrink-0 cursor-grab">
+                        <DragIcon />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <h3 className="font-extrabold text-slate-800 text-sm leading-snug break-words whitespace-normal">
+                          {node.title}
+                        </h3>
+                        <div className="mt-1">
+                          <span className="inline-block px-1.5 py-0.5 bg-slate-900/5 text-slate-700 rounded text-[10px] font-mono font-semibold">
+                            {node.startTime || '09:00'} - {node.endTime || '09:30'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-0.5 shrink-0">
+                      <button
+                        onClick={() => handleCopyNode(node)}
+                        className="p-1 hover:bg-slate-900/10 rounded text-slate-600 transition-colors"
+                        title="この分岐をコピー"
+                      >
+                        <CopyIcon />
+                      </button>
+                      <button
+                        onClick={() => handleEditClick(node)}
+                        className="p-1 hover:bg-slate-900/10 rounded text-slate-600 transition-colors"
+                        title="編集（リアルタイム自動保存）"
+                      >
+                        <EditIcon />
+                      </button>
+                      {node.id !== 'root' && (
+                        <button
+                          onClick={() => handleDeleteClick(node.id)}
+                          className="p-1 hover:bg-red-500/10 rounded text-red-600 transition-colors"
+                          title="削除"
+                        >
+                          <TrashIcon />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 順序・階層変更コントロールバー */}
+                  {node.id !== 'root' && (
+                    <div className="flex items-center justify-end gap-1 py-1 border-b border-slate-900/5 text-[10px] text-slate-600">
+                      <span className="text-[9px] text-slate-400 mr-auto">階層・並び順</span>
+                      <button
+                        onClick={() => handleReorderClick(node.id, -1)}
+                        className="p-0.5 hover:bg-slate-900/10 rounded"
+                        title="上に移動"
+                      >
+                        <ArrowUpIcon />
+                      </button>
+                      <button
+                        onClick={() => handleReorderClick(node.id, 1)}
+                        className="p-0.5 hover:bg-slate-900/10 rounded"
+                        title="下に移動"
+                      >
+                        <ArrowDownIcon />
+                      </button>
+                      <button
+                        onClick={() => handlePromoteClick(node.id)}
+                        className="p-0.5 hover:bg-slate-900/10 rounded"
+                        title="上の階層へ昇格（インデント解除）"
+                      >
+                        <ArrowLeftIcon />
+                      </button>
+                      <button
+                        onClick={() => handleDemoteClick(node.id)}
+                        className="p-0.5 hover:bg-slate-900/10 rounded"
+                        title="下の階層へ降格（インデント）"
+                      >
+                        <ArrowRightIcon />
+                      </button>
+                    </div>
+                  )}
+
+                  {/* 概要本文 */}
+                  {node.description && (
+                    <p className="text-xs text-slate-600 my-2 leading-relaxed break-words whitespace-normal">
+                      {node.description}
+                    </p>
+                  )}
+
+                  {/* AIあり / AIなし の比較表示 */}
+                  {(node.aiWith || node.aiWithout) && (
+                    <div className="my-2 space-y-1.5 text-xs">
+                      {node.aiWith && (
+                        <div className="bg-white/80 border border-emerald-500/20 rounded-lg p-2 text-slate-700">
+                          <div className="font-bold text-emerald-700 text-[11px] mb-0.5 flex items-center gap-1">
+                            <span>🟢 AIあり (〇〇さん)</span>
+                          </div>
+                          <p className="leading-snug break-words whitespace-normal text-[11px]">{node.aiWith}</p>
+                        </div>
+                      )}
+                      {node.aiWithout && (
+                        <div className="bg-white/80 border border-rose-500/20 rounded-lg p-2 text-slate-700">
+                          <div className="font-bold text-rose-700 text-[11px] mb-0.5 flex items-center gap-1">
+                            <span>🔴 AIなし (××さん)</span>
+                          </div>
+                          <p className="leading-snug break-words whitespace-normal text-[11px]">{node.aiWithout}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 機能タグ一覧 */}
+                  {currentFeatures.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {currentFeatures.map((feat, i) => (
+                        <span 
+                          key={i} 
+                          className="px-2 py-0.5 bg-indigo-50 border border-indigo-200/60 text-indigo-700 font-semibold text-[10px] rounded-md"
+                        >
+                          {feat}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* 分岐追加 & コピー貼り付けボタン */}
+                <div className="mt-3 pt-2 border-t border-slate-900/10 flex flex-col gap-1">
+                  <button
+                    onClick={() => handleAddClick(node)}
+                    className="w-full py-1.5 px-3 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 flex items-center justify-center gap-1.5 shadow-xs transition-colors"
+                  >
+                    <PlusIcon />
+                    <span>分岐を追加</span>
+                  </button>
+
+                  {copiedNode && (
+                    <button
+                      onClick={() => handlePasteNode(node)}
+                      className="w-full py-1 px-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-lg text-[11px] font-bold text-emerald-800 flex items-center justify-center gap-1 transition-colors"
+                    >
+                      <CopyIcon />
+                      <span>コピーをここに貼り付け</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* フローティング（画面右下固定）横スクロール・ズーム調整バー */}
+      <div className="fixed bottom-4 right-6 z-50 flex items-center gap-2 bg-slate-900/90 text-white backdrop-blur-md px-3 py-2 rounded-full shadow-2xl border border-slate-700">
+        <button
+          onClick={handleZoomOut}
+          className="p-1 hover:bg-slate-700 rounded text-xs font-bold"
+          title="縮小"
+        >
+          -
+        </button>
+        <span className="text-xs font-mono font-bold px-1">{Math.round(zoom * 100)}%</span>
+        <button
+          onClick={handleZoomIn}
+          className="p-1 hover:bg-slate-700 rounded text-xs font-bold"
+          title="拡大"
+        >
+          +
+        </button>
+        <div className="w-px h-4 bg-slate-700 mx-1"></div>
+        <button
+          onClick={() => scrollHorizontal(-400)}
+          className="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded-md text-xs font-bold transition-colors flex items-center gap-1"
+        >
+          ◀ 左
+        </button>
+        <button
+          onClick={() => scrollHorizontal(400)}
+          className="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded-md text-xs font-bold transition-colors flex items-center gap-1"
+        >
+          右 ▶
+        </button>
+      </div>
+
+      {/* モーダル (リアルタイム自動保存対応の編集 / 削除確認) */}
+      {modalState.isOpen && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6 animate-in zoom-in-95 duration-150">
+            {modalState.type === 'delete' ? (
+              <div>
+                <h2 className="text-base font-bold text-slate-800 mb-2">分岐の削除確認</h2>
+                <p className="text-xs text-slate-600 mb-6">
+                  この分岐および配下に連なるすべてのサブ分岐が削除されます。よろしいですか？
+                </p>
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={closeModal}
+                    className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                  >
+                    キャンセル
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmDelete}
+                    className="px-4 py-2 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+                  >
+                    削除する
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex justify-between items-center pb-3 border-b border-slate-100">
+                  <div>
+                    <h2 className="text-base font-bold text-slate-800">分岐タスクの編集</h2>
+                    <span className="text-[10px] text-emerald-600 font-semibold">
+                      ✓ 入力内容はリアルタイムに自動保存・同期されます
+                    </span>
+                  </div>
+                  <button 
+                    type="button" 
+                    onClick={closeModal}
+                    className="text-slate-400 hover:text-slate-600 text-lg leading-none"
+                  >
+                    &times;
+                  </button>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">タイトル</label>
+                  <input
+                    type="text"
+                    value={formData.title}
+                    onChange={(e) => updateFormAndAutoSave({ title: e.target.value })}
+                    placeholder="例: ルートA：仕事編"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">開始時間</label>
+                    <input
+                      type="text"
+                      value={formData.startTime}
+                      onChange={(e) => updateFormAndAutoSave({ startTime: e.target.value })}
+                      placeholder="09:00"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">終了時間</label>
+                    <input
+                      type="text"
+                      value={formData.endTime}
+                      onChange={(e) => updateFormAndAutoSave({ endTime: e.target.value })}
+                      placeholder="09:30"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">概要・シチュエーション説明</label>
+                  <textarea
+                    rows={2}
+                    value={formData.description}
+                    onChange={(e) => updateFormAndAutoSave({ description: e.target.value })}
+                    placeholder="この分岐の前提条件や状況を入力"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                {/* AIあり・AIなし入力欄 */}
+                <div className="space-y-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                  <div>
+                    <label className="block text-xs font-bold text-emerald-700 mb-1 flex items-center gap-1">
+                      <span>🟢 AIがある場合の文章 (〇〇さん)</span>
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={formData.aiWith}
+                      onChange={(e) => updateFormAndAutoSave({ aiWith: e.target.value })}
+                      placeholder="AI機能を活用してスムーズに完了するシナリオを入力"
+                      className="w-full px-3 py-2 border border-emerald-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-rose-700 mb-1 flex items-center gap-1">
+                      <span>🔴 AIがない場合の文章 (××さん)</span>
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={formData.aiWithout}
+                      onChange={(e) => updateFormAndAutoSave({ aiWithout: e.target.value })}
+                      placeholder="手動操作で手間や時間がかかるシナリオを入力"
+                      className="w-full px-3 py-2 border border-rose-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-rose-500 bg-white"
+                    />
+                  </div>
+                </div>
+
+                {/* 活用機能のタグ管理 */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-bold text-slate-700">活用機能の登録</label>
+                    <div className="flex border border-slate-200 rounded-md p-0.5 bg-slate-50 text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() => setFeatureTab('registered')}
+                        className={`px-2 py-0.5 rounded font-bold transition-colors ${
+                          featureTab === 'registered' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-500'
+                        }`}
+                      >
+                        登録済みから選択
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setFeatureTab('new')}
+                        className={`px-2 py-0.5 rounded font-bold transition-colors ${
+                          featureTab === 'new' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-500'
+                        }`}
+                      >
+                        ＋ 新規入力
+                      </button>
+                    </div>
+                  </div>
+
+                  {featureTab === 'registered' ? (
+                    <div className="bg-slate-50 border border-slate-200 p-2.5 rounded-lg max-h-36 overflow-y-auto space-y-1">
+                      {registeredFeatures.length === 0 ? (
+                        <p className="text-[11px] text-slate-400 text-center py-2">
+                          登録済みの機能はありません。「新規入力」タブから追加してください。
+                        </p>
+                      ) : (
+                        registeredFeatures.map((feat) => {
+                          const isSelected = formData.features.includes(feat);
+                          const isEditingThis = editingFeatureName === feat;
+
+                          return (
+                            <div key={feat} className="flex items-center justify-between gap-2 py-0.5">
+                              {isEditingThis ? (
+                                <div className="flex items-center gap-1 flex-1">
+                                  <input
+                                    type="text"
+                                    value={newFeatureNameInput}
+                                    onChange={(e) => setNewFeatureNameInput(e.target.value)}
+                                    className="px-2 py-0.5 border border-indigo-400 rounded text-xs flex-1"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (newFeatureNameInput.trim()) {
+                                        const trimmed = newFeatureNameInput.trim();
+                                        dispatchTreeUpdate(prev => renameFeatureInTree(prev, feat, trimmed));
+                                        updateFormAndAutoSave({
+                                          features: formData.features.map(f => f === feat ? trimmed : f)
+                                        });
+                                      }
+                                      setEditingFeatureName(null);
+                                    }}
+                                    className="text-[10px] bg-indigo-600 text-white px-2 py-0.5 rounded font-bold"
+                                  >
+                                    保存
+                                  </button>
+                                </div>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const nextFeatures = isSelected
+                                        ? formData.features.filter(f => f !== feat)
+                                        : [...formData.features, feat];
+                                      updateFormAndAutoSave({ features: nextFeatures });
+                                    }}
+                                    className={`text-left text-xs px-2.5 py-1 rounded-md flex-1 font-medium transition-colors ${
+                                      isSelected
+                                        ? 'bg-indigo-600 text-white font-bold'
+                                        : 'bg-white hover:bg-slate-200 border border-slate-200 text-slate-700'
+                                    }`}
+                                  >
+                                    {isSelected ? '✓ ' : '+ '}{feat}
+                                  </button>
+                                  
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingFeatureName(feat);
+                                        setNewFeatureNameInput(feat);
+                                      }}
+                                      className="p-1 hover:bg-slate-200 rounded text-slate-500"
+                                      title="機能名を編集"
+                                    >
+                                      <EditIcon />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        dispatchTreeUpdate(prev => deleteFeatureFromTree(prev, feat));
+                                        updateFormAndAutoSave({
+                                          features: formData.features.filter(f => f !== feat)
+                                        });
+                                      }}
+                                      className="p-1 hover:bg-red-100 rounded text-red-500"
+                                      title="登録機能一覧から完全削除"
+                                    >
+                                      <TrashIcon />
+                                    </button>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  ) : (
+                    <div>
+                      <input
+                        type="text"
+                        value={formData.newFeatureText}
+                        onChange={(e) => setFormData({ ...formData, newFeatureText: e.target.value })}
+                        placeholder="例: かこって検索, AI音声入力 (カンマ区切りで複数可)"
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const added = parseFeatures(formData.newFeatureText);
+                          if (added.length > 0) {
+                            const merged = Array.from(new Set([...formData.features, ...added]));
+                            updateFormAndAutoSave({
+                              features: merged,
+                              newFeatureText: ''
+                            });
+                            setFeatureTab('registered');
+                          }
+                        }}
+                        className="mt-1.5 w-full py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-md text-xs font-bold border border-indigo-200 transition-colors"
+                      >
+                        機能タグを追加（自動保存）
+                      </button>
+                    </div>
+                  )}
+
+                  {/* 選択中タグ表示 */}
+                  {formData.features.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      <span className="text-[10px] text-slate-400 self-center">選択中:</span>
+                      {formData.features.map((f, idx) => (
+                        <span key={idx} className="bg-indigo-100 text-indigo-800 text-[10px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                          {f}
+                          <button
+                            type="button"
+                            onClick={() => updateFormAndAutoSave({ features: formData.features.filter(item => item !== f) })}
+                            className="hover:text-red-600"
+                          >
+                            &times;
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* カードテーマカラー */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">カードテーマカラー</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {colorOptions.map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => updateFormAndAutoSave({ color: opt.value })}
+                        className={`py-1.5 px-2 rounded-lg text-xs font-bold border transition-all ${opt.value} ${
+                          formData.color === opt.value
+                            ? 'border-blue-600 ring-2 ring-blue-500/20 text-blue-900'
+                            : 'border-slate-200 text-slate-700 hover:border-slate-300'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={closeModal}
+                    className="px-5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors"
+                  >
+                    完了（閉じる）
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 共有ルーム設定モーダル */}
+      {isRoomModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 animate-in zoom-in-95 duration-150">
+            <h2 className="text-lg font-bold text-slate-800 mb-1">複数人同期用の「合言葉（ルームID）」</h2>
+            <p className="text-xs text-slate-500 mb-4">
+              Googleアカウント不要で、同じ合言葉（または共有URL）を開いたメンバー全員とリアルタイムに共同編集できます。
+            </p>
+            <input
+              type="text"
+              value={inputRoomId}
+              onChange={(e) => setInputRoomId(e.target.value)}
+              placeholder="例: team-a, workshop-1"
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm mb-4"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsRoomModalOpen(false)}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const cleaned = inputRoomId.trim() || 'default-room';
+                  setRoomId(cleaned);
+                  setIsRoomModalOpen(false);
+                  showToast(`合言葉「${cleaned}」に切り替えて自動保存を開始しました`);
+                }}
+                className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+              >
+                この合言葉で同期接続
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
