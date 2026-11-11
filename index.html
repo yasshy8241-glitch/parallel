@@ -28,7 +28,15 @@
     // ============================================================================
     // ★ Firebase設定 (ここにFirebaseのConfigを入力します)
     // ============================================================================
-    const CUSTOM_FIREBASE_CONFIG = null; 
+    const CUSTOM_FIREBASE_CONFIG = {
+      apiKey: "AIzaSyDioOEnADJClSQ0PH4bxulsWR_Ga45OpT4",
+      authDomain: "parallel-44c21.firebaseapp.com",
+      projectId: "parallel-44c21",
+      storageBucket: "parallel-44c21.firebasestorage.app",
+      messagingSenderId: "989119920183",
+      appId: "1:989119920183:web:8d95e2265935f204e527b2",
+      measurementId: "G-3PMRQ3R1HN"
+    };
 
     const getFirebaseConfig = () => {
       if (CUSTOM_FIREBASE_CONFIG) return CUSTOM_FIREBASE_CONFIG;
