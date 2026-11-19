@@ -36,7 +36,6 @@
     const AUTH_SESSION_KEY = 'parallel_site_authenticated_v1';
     const AUTH_STORAGE_KEY = 'parallel_custom_credentials_v1';
 
-    // 保存済みの認証情報を取得（未変更なら初期値を返す）
     const getStoredCredentials = () => {
       if (typeof window !== 'undefined') {
         try {
@@ -366,6 +365,38 @@
       }
     };
 
+    const getCardFillColor = (colorClass) => {
+      switch (colorClass) {
+        case 'bg-blue-50': return '#eff6ff';
+        case 'bg-amber-50': return '#fffbeb';
+        case 'bg-emerald-50': return '#ecfdf5';
+        case 'bg-purple-50': return '#faf5ff';
+        case 'bg-rose-50': return '#fff1f2';
+        default: return '#ffffff';
+      }
+    };
+
+    // Canvas用テキスト折り返しヘルパー
+    const wrapCanvasText = (ctx, text, maxWidth) => {
+      if (!text) return [];
+      const paragraphs = String(text).split('\n');
+      const lines = [];
+      for (const para of paragraphs) {
+        let currentLine = '';
+        for (const char of para) {
+          const testLine = currentLine + char;
+          if (ctx.measureText(testLine).width > maxWidth && currentLine.length > 0) {
+            lines.push(currentLine);
+            currentLine = char;
+          } else {
+            currentLine = testLine;
+          }
+        }
+        lines.push(currentLine);
+      }
+      return lines;
+    };
+
     // --- Tree Operation Helpers ---
     const addNodeToTree = (node, parentId, newNode) => {
       if (node.id === parentId) {
@@ -626,7 +657,6 @@
         }
       };
 
-      // コピー＆ペーストを確実に許可するハンドラ
       const handleAllowPaste = (e) => {
         e.stopPropagation();
       };
@@ -718,7 +748,6 @@
         return false;
       });
 
-      // PW変更モーダル用ステート
       const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
       const [pwForm, setPwForm] = useState({
         currentPassword: '',
@@ -913,114 +942,287 @@
         showToast('スプレッドシート用CSVファイルを出力しました。');
       };
 
-      // フローチャートの画像 (PNG) 出力
+      // 最適化された高画質フローチャート画像 (PNG) 出力
       const handleExportImage = () => {
         if (!treeData) return;
         const layout = computeTreeLayout(treeData, timelineStartHour);
-        const totalHours = Math.max(1, timelineEndHour - timelineStartHour);
-        const width = totalHours * PIXELS_PER_HOUR + 120;
-        const height = Math.max(850, layout.totalHeight + 60);
+
+        // 実在ノードの外接領域を計算（余白を最小限に最適化）
+        let minX = Infinity;
+        let maxX = -Infinity;
+        let minY = Infinity;
+        let maxY = -Infinity;
+
+        layout.nodes.forEach(node => {
+          const h = getNodeHeight(node);
+          const nx1 = node._x;
+          const nx2 = node._x + node._width;
+          const ny1 = node._y - h / 2;
+          const ny2 = node._y + h / 2;
+          if (nx1 < minX) minX = nx1;
+          if (nx2 > maxX) maxX = nx2;
+          if (ny1 < minY) minY = ny1;
+          if (ny2 > maxY) maxY = ny2;
+        });
+
+        if (!isFinite(minX)) {
+          minX = 0;
+          maxX = 800;
+          minY = 0;
+          maxY = 600;
+        }
+
+        const padX = 48;
+        const rulerHeight = 44;
+        const padTop = 28;
+        const padBottom = 48;
+
+        const contentW = (maxX - minX) + padX * 2;
+        const contentH = (maxY - minY) + padTop + padBottom;
+        const width = Math.max(640, contentW);
+        const height = Math.max(420, rulerHeight + contentH);
+
+        // 高DPIスケール（巨大フローチャート時はブラウザ上限を超えないよう自動調整）
+        const maxSidePx = 8192;
+        const idealScale = 2.5;
+        const scale = Math.min(idealScale, maxSidePx / Math.max(width, height));
 
         const canvas = document.createElement('canvas');
-        canvas.width = width * 2;
-        canvas.height = height * 2;
+        canvas.width = Math.round(width * scale);
+        canvas.height = Math.round(height * scale);
         const ctx = canvas.getContext('2d');
-        ctx.scale(2, 2);
+        ctx.scale(scale, scale);
 
+        const fontSans = '-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif';
+        const fontMono = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+
+        // 背景塗りつぶし
         ctx.fillStyle = '#f1f5f9';
         ctx.fillRect(0, 0, width, height);
 
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, width, 40);
-        ctx.strokeStyle = '#e2e8f0';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(0, 40);
-        ctx.lineTo(width, 40);
-        ctx.stroke();
+        // 座標変換ヘルパー（ノード座標 → 出力画像座標）
+        const toCanvasX = (x) => x - minX + padX;
+        const toCanvasY = (y) => y - minY + rulerHeight + padTop;
 
-        ctx.fillStyle = '#64748b';
-        ctx.font = 'bold 12px sans-serif';
-        for (let idx = 0; idx <= totalHours; idx++) {
-          const hour = timelineStartHour + idx;
-          const x = idx * PIXELS_PER_HOUR + 60;
+        // 関連する時間帯のみルーラー＆縦グリッドを描画
+        const startHourVisible = Math.max(timelineStartHour, Math.floor((minX - 60) / PIXELS_PER_HOUR) + timelineStartHour);
+        const endHourVisible = Math.min(timelineEndHour, Math.ceil((maxX - 60) / PIXELS_PER_HOUR) + timelineStartHour + 1);
+
+        for (let hour = startHourVisible; hour <= endHourVisible; hour++) {
+          const rawX = (hour - timelineStartHour) * PIXELS_PER_HOUR + 60;
+          const gx = toCanvasX(rawX);
+          ctx.strokeStyle = 'rgba(203, 213, 225, 0.55)';
+          ctx.lineWidth = 1;
           ctx.beginPath();
-          ctx.moveTo(x, 0);
-          ctx.lineTo(x, 40);
+          ctx.moveTo(gx, rulerHeight);
+          ctx.lineTo(gx, height);
           ctx.stroke();
-          ctx.fillText(`${String(hour).padStart(2, '0')}:00`, x + 6, 26);
         }
 
-        const yOffset = 50;
+        // 上部タイムラインルーラー描画
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, rulerHeight);
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(0, rulerHeight);
+        ctx.lineTo(width, rulerHeight);
+        ctx.stroke();
 
+        ctx.font = `700 12px ${fontMono}`;
+        for (let hour = startHourVisible; hour <= endHourVisible; hour++) {
+          const rawX = (hour - timelineStartHour) * PIXELS_PER_HOUR + 60;
+          const rx = toCanvasX(rawX);
+          ctx.strokeStyle = '#cbd5e1';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(rx, 0);
+          ctx.lineTo(rx, rulerHeight);
+          ctx.stroke();
+
+          ctx.fillStyle = '#475569';
+          ctx.fillText(`${String(hour).padStart(2, '0')}:00`, rx + 8, 27);
+        }
+
+        // S字接続線描画
         layout.links.forEach(link => {
-          const controlX1 = link.startX + Math.max(30, (link.endX - link.startX) / 2);
-          const controlX2 = link.endX - Math.max(30, (link.endX - link.startX) / 2);
+          const sx = toCanvasX(link.startX);
+          const sy = toCanvasY(link.startY);
+          const ex = toCanvasX(link.endX);
+          const ey = toCanvasY(link.endY);
+          const c1x = sx + Math.max(30, (ex - sx) / 2);
+          const c2x = ex - Math.max(30, (ex - sx) / 2);
 
           ctx.beginPath();
-          ctx.moveTo(link.startX, link.startY + yOffset);
-          ctx.bezierCurveTo(controlX1, link.startY + yOffset, controlX2, link.endY + yOffset, link.endX, link.endY + yOffset);
+          ctx.moveTo(sx, sy);
+          ctx.bezierCurveTo(c1x, sy, c2x, ey, ex, ey);
           ctx.strokeStyle = getColorStroke(link.colorClass);
           ctx.lineWidth = 4;
+          ctx.lineCap = 'round';
           ctx.stroke();
+
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.bezierCurveTo(c1x, sy, c2x, ey, ex, ey);
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 4]);
+          ctx.stroke();
+          ctx.setLineDash([]);
         });
 
+        // 各カード（タイトル・時間・概要・AIあり・AIなし・活用機能）を全件描画
         layout.nodes.forEach(node => {
-          const x = node._x;
           const h = getNodeHeight(node);
-          const y = node._y - (h / 2) + yOffset;
+          const x = toCanvasX(node._x);
+          const y = toCanvasY(node._y - h / 2);
           const w = node._width;
+          const innerW = w - 28;
 
-          ctx.fillStyle = '#ffffff';
-          ctx.shadowColor = 'rgba(0, 0, 0, 0.05)';
-          ctx.shadowBlur = 8;
-          ctx.shadowOffsetY = 2;
-
+          // カード本体と影
+          ctx.save();
+          ctx.fillStyle = getCardFillColor(node.color);
+          ctx.shadowColor = 'rgba(15, 23, 42, 0.08)';
+          ctx.shadowBlur = 10;
+          ctx.shadowOffsetY = 3;
           ctx.beginPath();
           ctx.roundRect(x, y, w, h, 16);
           ctx.fill();
-          ctx.shadowColor = 'transparent';
+          ctx.restore();
 
           ctx.strokeStyle = '#cbd5e1';
-          ctx.lineWidth = 1;
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.roundRect(x, y, w, h, 16);
           ctx.stroke();
 
-          ctx.fillStyle = '#1e293b';
-          ctx.font = 'bold 13px sans-serif';
-          if (node.title.length > 14) {
-            ctx.fillText(node.title.slice(0, 14), x + 12, y + 20);
-            ctx.fillText(node.title.slice(14, 28) + (node.title.length > 28 ? '...' : ''), x + 12, y + 36);
-          } else {
-            ctx.fillText(node.title, x + 12, y + 26);
-          }
+          let cursorY = y + 22;
 
-          ctx.fillStyle = '#e2e8f0';
+          // タイトル
+          ctx.fillStyle = '#0f172a';
+          ctx.font = `800 13.5px ${fontSans}`;
+          const titleLines = wrapCanvasText(ctx, node.title || '無題', innerW - 82).slice(0, 2);
+          titleLines.forEach((line, i) => {
+            ctx.fillText(line, x + 14, cursorY + i * 17);
+          });
+
+          // 時間バッジ（右上）
+          const timeLabel = `${node.startTime || '09:00'}-${node.endTime || '09:30'}`;
+          ctx.font = `700 10px ${fontMono}`;
+          const badgeW = Math.max(76, ctx.measureText(timeLabel).width + 12);
+          ctx.fillStyle = 'rgba(15, 23, 42, 0.06)';
           ctx.beginPath();
-          ctx.roundRect(x + w - 85, y + 12, 75, 18, 4);
+          ctx.roundRect(x + w - badgeW - 12, y + 11, badgeW, 20, 5);
           ctx.fill();
           ctx.fillStyle = '#334155';
-          ctx.font = 'bold 10px monospace';
-          ctx.fillText(`${node.startTime || '09:00'}-${node.endTime || '09:30'}`, x + w - 80, y + 25);
+          ctx.fillText(timeLabel, x + w - badgeW - 6, y + 24.5);
 
+          cursorY += Math.max(titleLines.length * 17, 22) + 4;
+
+          // ヘッダ区切り線
+          ctx.strokeStyle = 'rgba(15, 23, 42, 0.1)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(x + 14, cursorY);
+          ctx.lineTo(x + w - 14, cursorY);
+          ctx.stroke();
+          cursorY += 14;
+
+          // 概要・シチュエーション
           if (node.description) {
             ctx.fillStyle = '#475569';
-            ctx.font = '10px sans-serif';
-            ctx.fillText(node.description.slice(0, 24), x + 12, y + 50);
+            ctx.font = `500 11.5px ${fontSans}`;
+            const descLines = wrapCanvasText(ctx, node.description, innerW);
+            descLines.forEach(line => {
+              if (cursorY + 15 < y + h - 36) {
+                ctx.fillText(line, x + 14, cursorY);
+                cursorY += 15.5;
+              }
+            });
+            cursorY += 4;
           }
 
+          // 🟢 AIあり (〇〇さん)
+          if (node.aiWith) {
+            ctx.font = `500 11px ${fontSans}`;
+            const withLines = wrapCanvasText(ctx, node.aiWith, innerW - 16);
+            const boxH = 22 + withLines.length * 14.5;
+            if (cursorY + boxH < y + h - 32) {
+              ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+              ctx.beginPath();
+              ctx.roundRect(x + 14, cursorY, innerW, boxH, 8);
+              ctx.fill();
+              ctx.strokeStyle = 'rgba(16, 185, 129, 0.35)';
+              ctx.lineWidth = 1;
+              ctx.stroke();
+
+              ctx.fillStyle = '#047857';
+              ctx.font = `700 11px ${fontSans}`;
+              ctx.fillText('🟢 AIあり (〇〇さん)', x + 22, cursorY + 14);
+
+              ctx.fillStyle = '#334155';
+              ctx.font = `500 11px ${fontSans}`;
+              withLines.forEach((line, idx) => {
+                ctx.fillText(line, x + 22, cursorY + 29 + idx * 14.5);
+              });
+              cursorY += boxH + 7;
+            }
+          }
+
+          // 🔴 AIなし (××さん)
+          if (node.aiWithout) {
+            ctx.font = `500 11px ${fontSans}`;
+            const withoutLines = wrapCanvasText(ctx, node.aiWithout, innerW - 16);
+            const boxH = 22 + withoutLines.length * 14.5;
+            if (cursorY + boxH < y + h - 32) {
+              ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+              ctx.beginPath();
+              ctx.roundRect(x + 14, cursorY, innerW, boxH, 8);
+              ctx.fill();
+              ctx.strokeStyle = 'rgba(244, 63, 94, 0.35)';
+              ctx.lineWidth = 1;
+              ctx.stroke();
+
+              ctx.fillStyle = '#be123c';
+              ctx.font = `700 11px ${fontSans}`;
+              ctx.fillText('🔴 AIなし (××さん)', x + 22, cursorY + 14);
+
+              ctx.fillStyle = '#334155';
+              ctx.font = `500 11px ${fontSans}`;
+              withoutLines.forEach((line, idx) => {
+                ctx.fillText(line, x + 22, cursorY + 29 + idx * 14.5);
+              });
+              cursorY += boxH + 8;
+            }
+          }
+
+          // 活用機能タグ
           const feats = parseFeatures(node.features || node.feature);
-          let tagX = x + 12;
-          feats.forEach(f => {
-            ctx.fillStyle = '#e0e7ff';
-            const tw = ctx.measureText(f).width + 12;
-            ctx.beginPath();
-            ctx.roundRect(tagX, y + h - 28, tw, 16, 4);
-            ctx.fill();
-            ctx.fillStyle = '#4338ca';
-            ctx.font = 'bold 9px sans-serif';
-            ctx.fillText(f, tagX + 6, y + h - 16);
-            tagX += tw + 4;
-          });
+          if (feats.length > 0) {
+            let tagX = x + 14;
+            let tagY = Math.max(cursorY + 2, y + h - 30);
+            ctx.font = `700 10px ${fontSans}`;
+            feats.forEach(f => {
+              const tw = ctx.measureText(f).width + 14;
+              if (tagX + tw > x + w - 14 && tagX > x + 14) {
+                tagX = x + 14;
+                tagY += 22;
+              }
+              if (tagY + 18 <= y + h - 10) {
+                ctx.fillStyle = '#eef2ff';
+                ctx.beginPath();
+                ctx.roundRect(tagX, tagY, tw, 18, 5);
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(129, 140, 248, 0.45)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                ctx.fillStyle = '#4338ca';
+                ctx.fillText(f, tagX + 7, tagY + 12.5);
+                tagX += tw + 6;
+              }
+            });
+          }
         });
 
         const image = canvas.toDataURL('image/png');
@@ -1030,7 +1232,7 @@
         document.body.appendChild(link);
         link.click();
         link.remove();
-        showToast('フローチャートを画像 (PNG) として出力しました。');
+        showToast('最適化された高画質PNGを出力しました（AIあり・AIなし・活用機能を含む）。');
       };
 
       const handleExportJSON = () => {
@@ -1361,7 +1563,6 @@
         setModalState({ isOpen: false, type: '', targetNodeId: null });
       };
 
-      // 未認証の場合はログイン画面を表示
       if (!isAuthenticated) {
         return <LoginScreen onAuthenticated={() => setIsAuthenticated(true)} />;
       }
@@ -1443,7 +1644,7 @@
               <button
                 onClick={handleExportImage}
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 shadow-sm transition-all"
-                title="フローチャート全体を画像 (PNG) として出力"
+                title="フローチャート全体を最適化された高画質PNGとして出力"
               >
                 <ImageIcon />
                 <span>画像保存</span>
@@ -1571,7 +1772,7 @@
             </div>
           )}
 
-          {/* 固定タイムライン時間軸ルーラー（下スクロール時も常時上部に固定表示） */}
+          {/* 固定タイムライン時間軸ルーラー */}
           <div className="w-full h-10 bg-white/95 backdrop-blur-md border-b border-slate-200 shrink-0 overflow-hidden relative z-30 shadow-xs select-none">
             <div
               className="relative h-full"
