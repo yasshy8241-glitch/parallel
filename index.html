@@ -30,8 +30,8 @@
     // ★ サイト閲覧用 初期ID / パスワード設定
     // ============================================================================
     const DEFAULT_AUTH_CREDENTIALS = {
-      id: 'admin',
-      password: 'parallel2026'
+      id: 'agent',
+      password: 'Pixel'
     };
     const AUTH_SESSION_KEY = 'parallel_site_authenticated_v1';
     const AUTH_STORAGE_KEY = 'parallel_custom_credentials_v1';
@@ -947,7 +947,6 @@
         if (!treeData) return;
         const layout = computeTreeLayout(treeData, timelineStartHour);
 
-        // 実在ノードの外接領域を計算（余白を最小限に最適化）
         let minX = Infinity;
         let maxX = -Infinity;
         let minY = Infinity;
@@ -982,7 +981,6 @@
         const width = Math.max(640, contentW);
         const height = Math.max(420, rulerHeight + contentH);
 
-        // 高DPIスケール（巨大フローチャート時はブラウザ上限を超えないよう自動調整）
         const maxSidePx = 8192;
         const idealScale = 2.5;
         const scale = Math.min(idealScale, maxSidePx / Math.max(width, height));
@@ -996,15 +994,12 @@
         const fontSans = '-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif';
         const fontMono = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
 
-        // 背景塗りつぶし
         ctx.fillStyle = '#f1f5f9';
         ctx.fillRect(0, 0, width, height);
 
-        // 座標変換ヘルパー（ノード座標 → 出力画像座標）
         const toCanvasX = (x) => x - minX + padX;
         const toCanvasY = (y) => y - minY + rulerHeight + padTop;
 
-        // 関連する時間帯のみルーラー＆縦グリッドを描画
         const startHourVisible = Math.max(timelineStartHour, Math.floor((minX - 60) / PIXELS_PER_HOUR) + timelineStartHour);
         const endHourVisible = Math.min(timelineEndHour, Math.ceil((maxX - 60) / PIXELS_PER_HOUR) + timelineStartHour + 1);
 
@@ -1019,7 +1014,6 @@
           ctx.stroke();
         }
 
-        // 上部タイムラインルーラー描画
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, width, rulerHeight);
         ctx.strokeStyle = '#cbd5e1';
@@ -1044,7 +1038,6 @@
           ctx.fillText(`${String(hour).padStart(2, '0')}:00`, rx + 8, 27);
         }
 
-        // S字接続線描画
         layout.links.forEach(link => {
           const sx = toCanvasX(link.startX);
           const sy = toCanvasY(link.startY);
@@ -1071,7 +1064,6 @@
           ctx.setLineDash([]);
         });
 
-        // 各カード（タイトル・時間・概要・AIあり・AIなし・活用機能）を全件描画
         layout.nodes.forEach(node => {
           const h = getNodeHeight(node);
           const x = toCanvasX(node._x);
@@ -1079,7 +1071,6 @@
           const w = node._width;
           const innerW = w - 28;
 
-          // カード本体と影
           ctx.save();
           ctx.fillStyle = getCardFillColor(node.color);
           ctx.shadowColor = 'rgba(15, 23, 42, 0.08)';
@@ -1098,7 +1089,6 @@
 
           let cursorY = y + 22;
 
-          // タイトル
           ctx.fillStyle = '#0f172a';
           ctx.font = `800 13.5px ${fontSans}`;
           const titleLines = wrapCanvasText(ctx, node.title || '無題', innerW - 82).slice(0, 2);
@@ -1106,7 +1096,6 @@
             ctx.fillText(line, x + 14, cursorY + i * 17);
           });
 
-          // 時間バッジ（右上）
           const timeLabel = `${node.startTime || '09:00'}-${node.endTime || '09:30'}`;
           ctx.font = `700 10px ${fontMono}`;
           const badgeW = Math.max(76, ctx.measureText(timeLabel).width + 12);
@@ -1119,7 +1108,6 @@
 
           cursorY += Math.max(titleLines.length * 17, 22) + 4;
 
-          // ヘッダ区切り線
           ctx.strokeStyle = 'rgba(15, 23, 42, 0.1)';
           ctx.lineWidth = 1;
           ctx.beginPath();
@@ -1128,7 +1116,6 @@
           ctx.stroke();
           cursorY += 14;
 
-          // 概要・シチュエーション
           if (node.description) {
             ctx.fillStyle = '#475569';
             ctx.font = `500 11.5px ${fontSans}`;
@@ -1142,7 +1129,6 @@
             cursorY += 4;
           }
 
-          // 🟢 AIあり (〇〇さん)
           if (node.aiWith) {
             ctx.font = `500 11px ${fontSans}`;
             const withLines = wrapCanvasText(ctx, node.aiWith, innerW - 16);
@@ -1169,7 +1155,6 @@
             }
           }
 
-          // 🔴 AIなし (××さん)
           if (node.aiWithout) {
             ctx.font = `500 11px ${fontSans}`;
             const withoutLines = wrapCanvasText(ctx, node.aiWithout, innerW - 16);
@@ -1196,7 +1181,6 @@
             }
           }
 
-          // 活用機能タグ
           const feats = parseFeatures(node.features || node.feature);
           if (feats.length > 0) {
             let tagX = x + 14;
