@@ -24,7 +24,7 @@
     import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
     import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
-    const { useState, useEffect, useRef } = React;
+    const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
     // ============================================================================
     // ★ サイト閲覧用 初期ID / パスワード設定
@@ -80,6 +80,7 @@
 
     const appId = 'parallel-app';
     const CLIENT_ID = 'client_' + Math.random().toString(36).substring(2, 10);
+    const MAX_HISTORY = 50;
 
     const getInitialRoomId = () => {
       if (typeof window !== 'undefined') {
@@ -90,7 +91,8 @@
       return 'default-room';
     };
 
-    const getLocalStorageKey = (room) => `parallel_autosave_v1_${room}`;
+    const getLocalStorageKey = (room) => `parallel_autosave_v2_${room}`;
+    const getLegacyLocalStorageKey = (room) => `parallel_autosave_v1_${room}`;
 
     // --- Icons (Inline SVGs) ---
     const PlusIcon = () => (
@@ -125,6 +127,20 @@
       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
         <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+      </svg>
+    );
+
+    const UndoIcon = () => (
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 7v6h6"></path>
+        <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"></path>
+      </svg>
+    );
+
+    const RedoIcon = () => (
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 7v6h-6"></path>
+        <path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7"></path>
       </svg>
     );
 
@@ -232,6 +248,27 @@
       </svg>
     );
 
+    const TagIcon = () => (
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path>
+        <line x1="7" y1="7" x2="7.01" y2="7"></line>
+      </svg>
+    );
+
+    const BookmarkIcon = () => (
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path>
+      </svg>
+    );
+
+    const LayersIcon = () => (
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+        <polyline points="2 17 12 22 22 17"></polyline>
+        <polyline points="2 12 12 17 22 12"></polyline>
+      </svg>
+    );
+
     // 定数・ヘルパー関数
     const MIN_CARD_WIDTH = 260;
     const PIXELS_PER_HOUR = 500;
@@ -245,14 +282,45 @@
       return String(featuresInput).split(/[,、]/).map(s => s.trim()).filter(Boolean);
     };
 
-    const getNodeHeight = (node) => {
-      let baseH = 150;
-      if (node.description) baseH += Math.min(60, Math.ceil(node.description.length / 15) * 18);
-      if (node.aiWith) baseH += Math.min(90, 30 + Math.ceil(node.aiWith.length / 15) * 16);
-      if (node.aiWithout) baseH += Math.min(90, 30 + Math.ceil(node.aiWithout.length / 15) * 16);
+    const estimateLines = (text, charsPerLine = 16) => {
+      if (!text) return 0;
+      return String(text)
+        .split('\n')
+        .reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / charsPerLine)), 0);
+    };
+
+    const getNodeHeight = (node, cardWidth = MIN_CARD_WIDTH) => {
+      const charsPerLine = Math.max(14, Math.floor((cardWidth - 40) / 12));
+      let baseH = 185;
+      if (node.title) {
+        const titleLines = estimateLines(node.title, Math.max(10, charsPerLine - 4));
+        if (titleLines > 1) baseH += (titleLines - 1) * 20;
+      }
+      if (node.description) {
+        baseH += 12 + estimateLines(node.description, charsPerLine) * 18;
+      }
+      if (node.aiWith) {
+        baseH += 34 + estimateLines(node.aiWith, charsPerLine - 2) * 16;
+      }
+      if (node.aiWithout) {
+        baseH += 34 + estimateLines(node.aiWithout, charsPerLine - 2) * 16;
+      }
       const feats = parseFeatures(node.features || node.feature);
-      if (feats.length > 0) baseH += 30;
+      if (feats.length > 0) {
+        const totalChars = feats.reduce((sum, f) => sum + f.length + 3, 0);
+        const tagRows = Math.max(1, Math.ceil(totalChars / Math.max(16, charsPerLine)));
+        baseH += 14 + tagRows * 24;
+      }
       return Math.max(300, baseH);
+    };
+
+    const sanitizeTree = (node) => {
+      if (!node) return node;
+      const { _x, _y, _h, _width, _nodeH, ...clean } = node;
+      return {
+        ...clean,
+        children: Array.isArray(clean.children) ? clean.children.map(sanitizeTree) : []
+      };
     };
 
     const colorOptions = [
@@ -264,17 +332,21 @@
       { label: 'ローズ', value: 'bg-rose-50' },
     ];
 
-    const generateId = () => 'node_' + Math.random().toString(36).substr(2, 9);
+    const generateId = (prefix = 'node') => `${prefix}_` + Math.random().toString(36).substr(2, 9);
 
     const timeToMinutes = (timeStr) => {
-      if (!timeStr) return 9 * 60;
-      const [h, m] = timeStr.split(':').map(Number);
-      return (h || 0) * 60 + (m || 0);
+      if (!timeStr || typeof timeStr !== 'string') return 9 * 60;
+      const parts = timeStr.split(':');
+      const h = parseInt(parts[0], 10);
+      const m = parseInt(parts[1], 10);
+      if (isNaN(h) || isNaN(m)) return 9 * 60;
+      return Math.max(0, Math.min(24 * 60, h * 60 + m));
     };
 
     const minutesToTime = (totalMinutes) => {
-      const h = Math.floor(totalMinutes / 60);
-      const m = totalMinutes % 60;
+      const clamped = Math.max(0, Math.min(23 * 60 + 59, Math.round(totalMinutes)));
+      const h = Math.floor(clamped / 60);
+      const m = clamped % 60;
       return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
     };
 
@@ -342,6 +414,55 @@
       ]
     };
 
+    const createBlankTreeData = (title = 'スタート') => ({
+      id: 'root',
+      title,
+      description: 'このバージョンの開始シーンです。',
+      features: [],
+      aiWith: '',
+      aiWithout: '',
+      color: 'bg-white',
+      startTime: '09:00',
+      endTime: '09:30',
+      children: []
+    });
+
+    const initialMasterFeatures = [
+      'AI音声入力',
+      'かこって検索',
+      '先回りアシスト',
+      'マジックキャプチャー',
+      'かこって質問'
+    ];
+
+    const initialSituationStocks = [
+      {
+        id: 'stock_default_1',
+        title: '会議の議事録まとめ',
+        description: '1時間の定例会議が終了し、要点をチームへ共有する場面。',
+        features: ['AI音声入力'],
+        aiWith: 'レコーダーの自動文字起こし＆要約機能で、30秒で議事録の共有が完了。',
+        aiWithout: '録音データを聞き直しながら手動でメモを清書し、30分以上かかる。',
+        color: 'bg-blue-50',
+        durationMin: 30
+      }
+    ];
+
+    const createDefaultWorkspace = () => ({
+      timelines: [
+        {
+          id: 'tl_default',
+          name: 'Ver 1.0 (メイン)',
+          treeData: initialTreeData,
+          timelineStartHour: 0,
+          timelineEndHour: 24
+        }
+      ],
+      activeTimelineId: 'tl_default',
+      masterFeatures: initialMasterFeatures,
+      situationStocks: initialSituationStocks
+    });
+
     const getAllFeaturesFromTree = (node) => {
       if (!node) return [];
       const current = parseFeatures(node.features || node.feature);
@@ -352,6 +473,49 @@
         });
       }
       return Array.from(new Set([...current, ...childFeatures]));
+    };
+
+    // 既存データ(v1)と新データ(v2)の両方を正規化
+    const normalizeWorkspaceData = (raw) => {
+      if (!raw) return createDefaultWorkspace();
+      if (Array.isArray(raw.timelines) && raw.timelines.length > 0) {
+        const cleanTimelines = raw.timelines.map((tl, idx) => ({
+          id: tl.id || `tl_${idx}`,
+          name: tl.name || `Ver ${idx + 1}.0`,
+          treeData: sanitizeTree(tl.treeData || initialTreeData),
+          timelineStartHour: tl.timelineStartHour ?? 0,
+          timelineEndHour: tl.timelineEndHour ?? 24
+        }));
+        const activeId = cleanTimelines.some(t => t.id === raw.activeTimelineId)
+          ? raw.activeTimelineId
+          : cleanTimelines[0].id;
+        const treeFeats = cleanTimelines.flatMap(t => getAllFeaturesFromTree(t.treeData));
+        const masterFeatures = Array.from(new Set([...(raw.masterFeatures || []), ...treeFeats]));
+        const situationStocks = Array.isArray(raw.situationStocks) ? raw.situationStocks : [];
+        return {
+          timelines: cleanTimelines,
+          activeTimelineId: activeId,
+          masterFeatures,
+          situationStocks
+        };
+      }
+      // 旧フォーマット(v1)からの自動移行
+      const legacyTree = sanitizeTree(raw.treeData || (raw.id && raw.title ? raw : initialTreeData));
+      const treeFeats = getAllFeaturesFromTree(legacyTree);
+      return {
+        timelines: [
+          {
+            id: 'tl_default',
+            name: 'Ver 1.0 (メイン)',
+            treeData: legacyTree,
+            timelineStartHour: raw.timelineStartHour ?? 0,
+            timelineEndHour: raw.timelineEndHour ?? 24
+          }
+        ],
+        activeTimelineId: 'tl_default',
+        masterFeatures: Array.from(new Set([...initialMasterFeatures, ...treeFeats])),
+        situationStocks: initialSituationStocks
+      };
     };
 
     const getColorStroke = (colorClass) => {
@@ -376,7 +540,6 @@
       }
     };
 
-    // Canvas用テキスト折り返しヘルパー
     const wrapCanvasText = (ctx, text, maxWidth) => {
       if (!text) return [];
       const paragraphs = String(text).split('\n');
@@ -398,6 +561,15 @@
     };
 
     // --- Tree Operation Helpers ---
+    const flattenNodes = (node, depth = 0, list = []) => {
+      if (!node) return list;
+      list.push({ id: node.id, title: node.title, endTime: node.endTime, color: node.color, depth });
+      if (node.children) {
+        node.children.forEach(c => flattenNodes(c, depth + 1, list));
+      }
+      return list;
+    };
+
     const addNodeToTree = (node, parentId, newNode) => {
       if (node.id === parentId) {
         return { ...node, children: [...(node.children || []), newNode] };
@@ -446,8 +618,8 @@
 
     const pasteNodeToParent = (node, targetParentId, nodeToPaste) => {
       const singleClonedNode = {
-        ...nodeToPaste,
-        id: generateId(),
+        ...sanitizeTree(nodeToPaste),
+        id: generateId('node'),
         title: nodeToPaste.title,
         children: []
       };
@@ -577,65 +749,92 @@
     };
 
     // --- Tree Layout Computation ---
-    const computeTreeLayout = (tree, timelineStartHour = 0) => {
+    const computeTreeLayout = (tree, timelineStartHour = 0, dragOverride = null) => {
       const nodes = [];
       const links = [];
+      const metaMap = new Map();
+
+      const getEffectiveTimes = (n) => {
+        if (dragOverride && dragOverride.id === n.id) {
+          return {
+            startTime: dragOverride.previewStartTime,
+            endTime: dragOverride.previewEndTime
+          };
+        }
+        return {
+          startTime: n.startTime || '09:00',
+          endTime: n.endTime || '09:30'
+        };
+      };
 
       const computeHeight = (n) => {
-        n._nodeH = getNodeHeight(n);
+        const { startTime, endTime } = getEffectiveTimes(n);
+        const startMin = timeToMinutes(startTime);
+        const endMin = timeToMinutes(endTime);
+        const durationMin = Math.max(15, endMin - startMin);
+        const width = Math.max(MIN_CARD_WIDTH, (durationMin / 60) * PIXELS_PER_HOUR);
+        const nodeH = getNodeHeight(n, width);
+
+        let subtreeH;
         if (!n.children || n.children.length === 0) {
-          n._h = n._nodeH + GAP_Y;
+          subtreeH = nodeH + GAP_Y;
         } else {
-          n._h = n.children.reduce((sum, child) => sum + computeHeight(child), 0);
-          n._h = Math.max(n._h, n._nodeH + GAP_Y);
+          const childrenSum = n.children.reduce((sum, child) => sum + computeHeight(child), 0);
+          subtreeH = Math.max(childrenSum, nodeH + GAP_Y);
         }
-        return n._h;
+
+        metaMap.set(n.id, { width, nodeH, subtreeH, startMin, durationMin, startTime, endTime });
+        return subtreeH;
       };
       computeHeight(tree);
 
       const assignCoords = (n, currentY, minX = 60) => {
-        const startMin = timeToMinutes(n.startTime || '09:00');
-        const endMin = timeToMinutes(n.endTime || '09:30');
-        const durationMin = Math.max(15, endMin - startMin);
+        const meta = metaMap.get(n.id);
+        const timeBasedX = ((meta.startMin - timelineStartHour * 60) / 60) * PIXELS_PER_HOUR + 60;
+        const x = Math.max(timeBasedX, minX);
+        const parentRightX = x + meta.width;
 
-        const timeBasedX = ((startMin - timelineStartHour * 60) / 60) * PIXELS_PER_HOUR + 60;
-        n._x = Math.max(timeBasedX, minX);
-        n._width = Math.max(MIN_CARD_WIDTH, (durationMin / 60) * PIXELS_PER_HOUR);
-
-        let childY = currentY;
-        const parentRightX = n._x + n._width;
-
+        let y;
         if (n.children && n.children.length > 0) {
-          n.children.forEach(child => {
-            assignCoords(child, childY, parentRightX + MIN_GAP_X);
-            childY += child._h;
+          let childY = currentY;
+          const childCoords = n.children.map(child => {
+            const cPos = assignCoords(child, childY, parentRightX + MIN_GAP_X);
+            childY += metaMap.get(child.id).subtreeH;
+            return cPos;
           });
-          const firstChild = n.children[0];
-          const lastChild = n.children[n.children.length - 1];
-          n._y = (firstChild._y + lastChild._y) / 2;
-        } else {
-          n._y = currentY + (n._nodeH / 2);
-        }
+          y = (childCoords[0].y + childCoords[childCoords.length - 1].y) / 2;
 
-        nodes.push(n);
-
-        if (n.children) {
-          n.children.forEach(child => {
+          childCoords.forEach((cPos, idx) => {
+            const child = n.children[idx];
             links.push({
               id: `${n.id}-${child.id}`,
               startX: parentRightX,
-              startY: n._y,
-              endX: child._x,
-              endY: child._y,
+              startY: y,
+              endX: cPos.x,
+              endY: cPos.y,
               colorClass: child.color || 'bg-white'
             });
           });
+        } else {
+          y = currentY + (meta.nodeH / 2);
         }
+
+        nodes.push({
+          node: n,
+          x,
+          y,
+          width: meta.width,
+          height: meta.nodeH,
+          displayStartTime: meta.startTime,
+          displayEndTime: meta.endTime
+        });
+
+        return { x, y };
       };
 
       assignCoords(tree, TOP_MARGIN, 60);
 
-      const maxY = Math.max(...nodes.map(n => n._y + (n._nodeH || 300) / 2), 850);
+      const maxY = Math.max(...nodes.map(item => item.y + item.height / 2), 850);
       return { nodes, links, totalHeight: maxY + GAP_Y };
     };
 
@@ -740,6 +939,7 @@
       );
     }
 
+    // === PART 1 END (この直下にパート2を貼り付けてください) ===
     function ParallelApp() {
       const [isAuthenticated, setIsAuthenticated] = useState(() => {
         if (typeof window !== 'undefined') {
@@ -748,6 +948,10 @@
         return false;
       });
 
+      // メインタブ: 'timeline' | 'features' | 'stocks'
+      const [activeMainTab, setActiveMainTab] = useState('timeline');
+
+      // パスワード変更モーダル
       const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
       const [pwForm, setPwForm] = useState({
         currentPassword: '',
@@ -758,10 +962,13 @@
       const [pwError, setPwError] = useState('');
       const [showNewPw, setShowNewPw] = useState(false);
 
+      // ワークスペース全体データ (timelines, activeTimelineId, masterFeatures, situationStocks)
       const initialRoom = getInitialRoomId();
-      const [treeData, setTreeData] = useState(null);
-      const [timelineStartHour, setTimelineStartHour] = useState(0);
-      const [timelineEndHour, setTimelineEndHour] = useState(24);
+      const [workspace, setWorkspace] = useState(null);
+      const [pastHistory, setPastHistory] = useState([]);
+      const [futureHistory, setFutureHistory] = useState([]);
+
+      // 表示・同期状態
       const [zoom, setZoom] = useState(1.0);
       const [scrollLeft, setScrollLeft] = useState(0);
       const [roomId, setRoomId] = useState(initialRoom);
@@ -771,26 +978,97 @@
       const [lastSavedText, setLastSavedText] = useState('');
       const [toastMessage, setToastMessage] = useState('');
       const [copiedNode, setCopiedNode] = useState(null);
+
+      // タイムラインVer管理用モーダル・入力
+      const [versionModal, setVersionModal] = useState({
+        isOpen: false,
+        mode: 'create', // 'create' | 'rename' | 'delete'
+        targetId: null,
+        name: '',
+        baseMode: 'blank' // 'blank' | 'clone'
+      });
+
+      // 活用機能マスタータブ用入力
+      const [masterFeatureInput, setMasterFeatureInput] = useState('');
+      const [editingMasterFeat, setEditingMasterFeat] = useState(null);
+      const [editingMasterFeatVal, setEditingMasterFeatVal] = useState('');
+
+      // シチュエーションストックタブ用入力
+      const [stockModal, setStockModal] = useState({ isOpen: false, editId: null });
+      const [stockForm, setStockForm] = useState({
+        title: '',
+        description: '',
+        features: [],
+        aiWith: '',
+        aiWithout: '',
+        color: 'bg-blue-50',
+        durationMin: 30
+      });
+      // ストックからタイムラインへ追加する際の親ノード選択
+      const [stockInsertTarget, setStockInsertTarget] = useState({});
+
+      // ノード編集・削除モーダル
       const [featureTab, setFeatureTab] = useState('registered');
       const [editingFeatureName, setEditingFeatureName] = useState(null);
       const [newFeatureNameInput, setNewFeatureNameInput] = useState('');
-
       const [modalState, setModalState] = useState({ isOpen: false, type: '', targetNodeId: null });
-      const [formData, setFormData] = useState({ 
-        title: '', 
-        description: '', 
-        features: [], 
+      const [formData, setFormData] = useState({
+        title: '',
+        description: '',
+        features: [],
         newFeatureText: '',
         aiWith: '',
         aiWithout: '',
-        color: 'bg-white', 
+        color: 'bg-white',
         startTime: '09:00',
         endTime: '09:30'
       });
+
+      // ドラッグ＆パン状態
       const [dragState, setDragState] = useState(null);
+      const [panState, setPanState] = useState(null);
+
       const mainScrollRef = useRef(null);
       const fileInputRef = useRef(null);
       const syncTimeoutRef = useRef(null);
+      const workspaceRef = useRef(null);
+      const modalHistoryRecordedRef = useRef(false);
+
+      useEffect(() => {
+        workspaceRef.current = workspace;
+      }, [workspace]);
+
+      // アクティブなタイムラインの派生値
+      const activeTimeline = useMemo(() => {
+        if (!workspace || !workspace.timelines?.length) return null;
+        return workspace.timelines.find(t => t.id === workspace.activeTimelineId) || workspace.timelines[0];
+      }, [workspace]);
+
+      const treeData = activeTimeline?.treeData || null;
+      const timelineStartHour = activeTimeline?.timelineStartHour ?? 0;
+      const timelineEndHour = activeTimeline?.timelineEndHour ?? 24;
+
+      // マスター機能 + 全タイムライン内の機能を統合した一覧
+      const registeredFeatures = useMemo(() => {
+        if (!workspace) return [];
+        const fromTrees = workspace.timelines.flatMap(t => getAllFeaturesFromTree(t.treeData));
+        return Array.from(new Set([...(workspace.masterFeatures || []), ...fromTrees]));
+      }, [workspace]);
+
+      // 現在のタイムラインの全ノード一覧（ストック追加時の親選択用）
+      const flatActiveNodes = useMemo(() => {
+        return treeData ? flattenNodes(treeData) : [];
+      }, [treeData]);
+
+      const showToast = useCallback((msg) => {
+        setToastMessage(msg);
+        setTimeout(() => setToastMessage(''), 3000);
+      }, []);
+
+      const formatCurrentTime = () => {
+        const now = new Date();
+        return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+      };
 
       const handleLogout = () => {
         sessionStorage.removeItem(AUTH_SESSION_KEY);
@@ -831,11 +1109,10 @@
           return;
         }
 
-        const updatedCreds = {
+        localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
           id: pwForm.newId.trim(),
           password: pwForm.newPassword
-        };
-        localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(updatedCreds));
+        }));
         setIsPasswordModalOpen(false);
         showToast('ID・パスワードを変更しました（次回ログイン時から有効です）');
       };
@@ -849,25 +1126,13 @@
       const handleZoomIn = () => setZoom(prev => Math.min(1.5, Math.round((prev + 0.1) * 10) / 10));
       const handleZoomOut = () => setZoom(prev => Math.max(0.5, Math.round((prev - 0.1) * 10) / 10));
 
-      const showToast = (msg) => {
-        setToastMessage(msg);
-        setTimeout(() => setToastMessage(''), 3000);
-      };
-
-      const formatCurrentTime = () => {
-        const now = new Date();
-        return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-      };
-
-      const saveToLocalStorage = (targetRoom, nextTree, nextStart, nextEnd) => {
+      const saveToLocalStorage = (targetRoom, nextWorkspace) => {
         try {
-          const payload = {
-            treeData: nextTree,
-            timelineStartHour: nextStart,
-            timelineEndHour: nextEnd,
+          const cleanWs = normalizeWorkspaceData(nextWorkspace);
+          localStorage.setItem(getLocalStorageKey(targetRoom), JSON.stringify({
+            ...cleanWs,
             updatedAt: Date.now()
-          };
-          localStorage.setItem(getLocalStorageKey(targetRoom), JSON.stringify(payload));
+          }));
           setLastSavedText(formatCurrentTime());
         } catch (e) {
           console.warn("LocalStorage save error:", e);
@@ -876,9 +1141,11 @@
 
       const loadFromLocalStorage = (targetRoom) => {
         try {
-          const raw = localStorage.getItem(getLocalStorageKey(targetRoom));
-          if (!raw) return null;
-          return JSON.parse(raw);
+          const rawV2 = localStorage.getItem(getLocalStorageKey(targetRoom));
+          if (rawV2) return normalizeWorkspaceData(JSON.parse(rawV2));
+          const rawV1 = localStorage.getItem(getLegacyLocalStorageKey(targetRoom));
+          if (rawV1) return normalizeWorkspaceData(JSON.parse(rawV1));
+          return null;
         } catch (e) {
           return null;
         }
@@ -903,378 +1170,6 @@
         });
       };
 
-      // スプレッドシート用 CSV 出力
-      const handleExportCSV = () => {
-        if (!treeData) return;
-        const rows = [
-          ['階層パス', '分岐タイトル', '開始時間', '終了時間', '概要・シチュエーション', '活用機能', '🟢 AIあり(〇〇さん)', '🔴 AIなし(××さん)']
-        ];
-
-        const traverse = (node, parentPath = '') => {
-          const currentPath = parentPath ? `${parentPath} > ${node.title}` : node.title;
-          const feats = parseFeatures(node.features || node.feature).join(', ');
-          rows.push([
-            `"${currentPath.replace(/"/g, '""')}"`,
-            `"${(node.title || '').replace(/"/g, '""')}"`,
-            `"${node.startTime || ''}"`,
-            `"${node.endTime || ''}"`,
-            `"${(node.description || '').replace(/"/g, '""')}"`,
-            `"${feats.replace(/"/g, '""')}"`,
-            `"${(node.aiWith || '').replace(/"/g, '""')}"`,
-            `"${(node.aiWithout || '').replace(/"/g, '""')}"`
-          ]);
-          if (node.children) {
-            node.children.forEach(child => traverse(child, currentPath));
-          }
-        };
-
-        traverse(treeData);
-
-        const csvContent = '\uFEFF' + rows.map(r => r.join(',')).join('\n');
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', `parallel_flowchart_${roomId}_${new Date().toISOString().slice(0, 10)}.csv`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        showToast('スプレッドシート用CSVファイルを出力しました。');
-      };
-
-      // 最適化された高画質フローチャート画像 (PNG) 出力
-      const handleExportImage = () => {
-        if (!treeData) return;
-        const layout = computeTreeLayout(treeData, timelineStartHour);
-
-        let minX = Infinity;
-        let maxX = -Infinity;
-        let minY = Infinity;
-        let maxY = -Infinity;
-
-        layout.nodes.forEach(node => {
-          const h = getNodeHeight(node);
-          const nx1 = node._x;
-          const nx2 = node._x + node._width;
-          const ny1 = node._y - h / 2;
-          const ny2 = node._y + h / 2;
-          if (nx1 < minX) minX = nx1;
-          if (nx2 > maxX) maxX = nx2;
-          if (ny1 < minY) minY = ny1;
-          if (ny2 > maxY) maxY = ny2;
-        });
-
-        if (!isFinite(minX)) {
-          minX = 0;
-          maxX = 800;
-          minY = 0;
-          maxY = 600;
-        }
-
-        const padX = 48;
-        const rulerHeight = 44;
-        const padTop = 28;
-        const padBottom = 48;
-
-        const contentW = (maxX - minX) + padX * 2;
-        const contentH = (maxY - minY) + padTop + padBottom;
-        const width = Math.max(640, contentW);
-        const height = Math.max(420, rulerHeight + contentH);
-
-        const maxSidePx = 8192;
-        const idealScale = 2.5;
-        const scale = Math.min(idealScale, maxSidePx / Math.max(width, height));
-
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.round(width * scale);
-        canvas.height = Math.round(height * scale);
-        const ctx = canvas.getContext('2d');
-        ctx.scale(scale, scale);
-
-        const fontSans = '-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif';
-        const fontMono = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
-
-        ctx.fillStyle = '#f1f5f9';
-        ctx.fillRect(0, 0, width, height);
-
-        const toCanvasX = (x) => x - minX + padX;
-        const toCanvasY = (y) => y - minY + rulerHeight + padTop;
-
-        const startHourVisible = Math.max(timelineStartHour, Math.floor((minX - 60) / PIXELS_PER_HOUR) + timelineStartHour);
-        const endHourVisible = Math.min(timelineEndHour, Math.ceil((maxX - 60) / PIXELS_PER_HOUR) + timelineStartHour + 1);
-
-        for (let hour = startHourVisible; hour <= endHourVisible; hour++) {
-          const rawX = (hour - timelineStartHour) * PIXELS_PER_HOUR + 60;
-          const gx = toCanvasX(rawX);
-          ctx.strokeStyle = 'rgba(203, 213, 225, 0.55)';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(gx, rulerHeight);
-          ctx.lineTo(gx, height);
-          ctx.stroke();
-        }
-
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, width, rulerHeight);
-        ctx.strokeStyle = '#cbd5e1';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.moveTo(0, rulerHeight);
-        ctx.lineTo(width, rulerHeight);
-        ctx.stroke();
-
-        ctx.font = `700 12px ${fontMono}`;
-        for (let hour = startHourVisible; hour <= endHourVisible; hour++) {
-          const rawX = (hour - timelineStartHour) * PIXELS_PER_HOUR + 60;
-          const rx = toCanvasX(rawX);
-          ctx.strokeStyle = '#cbd5e1';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(rx, 0);
-          ctx.lineTo(rx, rulerHeight);
-          ctx.stroke();
-
-          ctx.fillStyle = '#475569';
-          ctx.fillText(`${String(hour).padStart(2, '0')}:00`, rx + 8, 27);
-        }
-
-        layout.links.forEach(link => {
-          const sx = toCanvasX(link.startX);
-          const sy = toCanvasY(link.startY);
-          const ex = toCanvasX(link.endX);
-          const ey = toCanvasY(link.endY);
-          const c1x = sx + Math.max(30, (ex - sx) / 2);
-          const c2x = ex - Math.max(30, (ex - sx) / 2);
-
-          ctx.beginPath();
-          ctx.moveTo(sx, sy);
-          ctx.bezierCurveTo(c1x, sy, c2x, ey, ex, ey);
-          ctx.strokeStyle = getColorStroke(link.colorClass);
-          ctx.lineWidth = 4;
-          ctx.lineCap = 'round';
-          ctx.stroke();
-
-          ctx.beginPath();
-          ctx.moveTo(sx, sy);
-          ctx.bezierCurveTo(c1x, sy, c2x, ey, ex, ey);
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
-          ctx.lineWidth = 1.5;
-          ctx.setLineDash([4, 4]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        });
-
-        layout.nodes.forEach(node => {
-          const h = getNodeHeight(node);
-          const x = toCanvasX(node._x);
-          const y = toCanvasY(node._y - h / 2);
-          const w = node._width;
-          const innerW = w - 28;
-
-          ctx.save();
-          ctx.fillStyle = getCardFillColor(node.color);
-          ctx.shadowColor = 'rgba(15, 23, 42, 0.08)';
-          ctx.shadowBlur = 10;
-          ctx.shadowOffsetY = 3;
-          ctx.beginPath();
-          ctx.roundRect(x, y, w, h, 16);
-          ctx.fill();
-          ctx.restore();
-
-          ctx.strokeStyle = '#cbd5e1';
-          ctx.lineWidth = 1.2;
-          ctx.beginPath();
-          ctx.roundRect(x, y, w, h, 16);
-          ctx.stroke();
-
-          let cursorY = y + 22;
-
-          ctx.fillStyle = '#0f172a';
-          ctx.font = `800 13.5px ${fontSans}`;
-          const titleLines = wrapCanvasText(ctx, node.title || '無題', innerW - 82).slice(0, 2);
-          titleLines.forEach((line, i) => {
-            ctx.fillText(line, x + 14, cursorY + i * 17);
-          });
-
-          const timeLabel = `${node.startTime || '09:00'}-${node.endTime || '09:30'}`;
-          ctx.font = `700 10px ${fontMono}`;
-          const badgeW = Math.max(76, ctx.measureText(timeLabel).width + 12);
-          ctx.fillStyle = 'rgba(15, 23, 42, 0.06)';
-          ctx.beginPath();
-          ctx.roundRect(x + w - badgeW - 12, y + 11, badgeW, 20, 5);
-          ctx.fill();
-          ctx.fillStyle = '#334155';
-          ctx.fillText(timeLabel, x + w - badgeW - 6, y + 24.5);
-
-          cursorY += Math.max(titleLines.length * 17, 22) + 4;
-
-          ctx.strokeStyle = 'rgba(15, 23, 42, 0.1)';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(x + 14, cursorY);
-          ctx.lineTo(x + w - 14, cursorY);
-          ctx.stroke();
-          cursorY += 14;
-
-          if (node.description) {
-            ctx.fillStyle = '#475569';
-            ctx.font = `500 11.5px ${fontSans}`;
-            const descLines = wrapCanvasText(ctx, node.description, innerW);
-            descLines.forEach(line => {
-              if (cursorY + 15 < y + h - 36) {
-                ctx.fillText(line, x + 14, cursorY);
-                cursorY += 15.5;
-              }
-            });
-            cursorY += 4;
-          }
-
-          if (node.aiWith) {
-            ctx.font = `500 11px ${fontSans}`;
-            const withLines = wrapCanvasText(ctx, node.aiWith, innerW - 16);
-            const boxH = 22 + withLines.length * 14.5;
-            if (cursorY + boxH < y + h - 32) {
-              ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
-              ctx.beginPath();
-              ctx.roundRect(x + 14, cursorY, innerW, boxH, 8);
-              ctx.fill();
-              ctx.strokeStyle = 'rgba(16, 185, 129, 0.35)';
-              ctx.lineWidth = 1;
-              ctx.stroke();
-
-              ctx.fillStyle = '#047857';
-              ctx.font = `700 11px ${fontSans}`;
-              ctx.fillText('🟢 AIあり (〇〇さん)', x + 22, cursorY + 14);
-
-              ctx.fillStyle = '#334155';
-              ctx.font = `500 11px ${fontSans}`;
-              withLines.forEach((line, idx) => {
-                ctx.fillText(line, x + 22, cursorY + 29 + idx * 14.5);
-              });
-              cursorY += boxH + 7;
-            }
-          }
-
-          if (node.aiWithout) {
-            ctx.font = `500 11px ${fontSans}`;
-            const withoutLines = wrapCanvasText(ctx, node.aiWithout, innerW - 16);
-            const boxH = 22 + withoutLines.length * 14.5;
-            if (cursorY + boxH < y + h - 32) {
-              ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
-              ctx.beginPath();
-              ctx.roundRect(x + 14, cursorY, innerW, boxH, 8);
-              ctx.fill();
-              ctx.strokeStyle = 'rgba(244, 63, 94, 0.35)';
-              ctx.lineWidth = 1;
-              ctx.stroke();
-
-              ctx.fillStyle = '#be123c';
-              ctx.font = `700 11px ${fontSans}`;
-              ctx.fillText('🔴 AIなし (××さん)', x + 22, cursorY + 14);
-
-              ctx.fillStyle = '#334155';
-              ctx.font = `500 11px ${fontSans}`;
-              withoutLines.forEach((line, idx) => {
-                ctx.fillText(line, x + 22, cursorY + 29 + idx * 14.5);
-              });
-              cursorY += boxH + 8;
-            }
-          }
-
-          const feats = parseFeatures(node.features || node.feature);
-          if (feats.length > 0) {
-            let tagX = x + 14;
-            let tagY = Math.max(cursorY + 2, y + h - 30);
-            ctx.font = `700 10px ${fontSans}`;
-            feats.forEach(f => {
-              const tw = ctx.measureText(f).width + 14;
-              if (tagX + tw > x + w - 14 && tagX > x + 14) {
-                tagX = x + 14;
-                tagY += 22;
-              }
-              if (tagY + 18 <= y + h - 10) {
-                ctx.fillStyle = '#eef2ff';
-                ctx.beginPath();
-                ctx.roundRect(tagX, tagY, tw, 18, 5);
-                ctx.fill();
-                ctx.strokeStyle = 'rgba(129, 140, 248, 0.45)';
-                ctx.lineWidth = 1;
-                ctx.stroke();
-
-                ctx.fillStyle = '#4338ca';
-                ctx.fillText(f, tagX + 7, tagY + 12.5);
-                tagX += tw + 6;
-              }
-            });
-          }
-        });
-
-        const image = canvas.toDataURL('image/png');
-        const link = document.createElement('a');
-        link.href = image;
-        link.setAttribute('download', `parallel_flowchart_${roomId}_${new Date().toISOString().slice(0, 10)}.png`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        showToast('最適化された高画質PNGを出力しました（AIあり・AIなし・活用機能を含む）。');
-      };
-
-      const handleExportJSON = () => {
-        if (!treeData) return;
-        const exportObject = {
-          version: '1.0',
-          roomId,
-          timelineStartHour,
-          timelineEndHour,
-          treeData
-        };
-        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(exportObject, null, 2));
-        const downloadAnchor = document.createElement('a');
-        downloadAnchor.setAttribute("href", dataStr);
-        downloadAnchor.setAttribute("download", `parallel_backup_${roomId}_${new Date().toISOString().slice(0,10)}.json`);
-        document.body.appendChild(downloadAnchor);
-        downloadAnchor.click();
-        downloadAnchor.remove();
-        showToast('JSONファイルとして保存しました。');
-      };
-
-      const handleImportJSON = (e) => {
-        const fileReader = new FileReader();
-        const file = e.target.files?.[0];
-        if (!file) return;
-
-        fileReader.readAsText(file, "UTF-8");
-        fileReader.onload = (event) => {
-          try {
-            const parsed = JSON.parse(event.target.result);
-            if (parsed.treeData) {
-              setTreeData(parsed.treeData);
-              let nextStart = timelineStartHour;
-              let nextEnd = timelineEndHour;
-              if (parsed.timelineStartHour !== undefined) {
-                 setTimelineStartHour(parsed.timelineStartHour);
-                 nextStart = parsed.timelineStartHour;
-              }
-              if (parsed.timelineEndHour !== undefined) {
-                 setTimelineEndHour(parsed.timelineEndHour);
-                 nextEnd = parsed.timelineEndHour;
-              }
-              syncToCloudAndLocal(parsed.treeData, nextStart, nextEnd);
-              showToast('保存ファイルからデータを復元・自動保存しました。');
-            } else if (parsed.id && parsed.title) {
-              setTreeData(parsed);
-              syncToCloudAndLocal(parsed, timelineStartHour, timelineEndHour);
-              showToast('データを復元・自動保存しました。');
-            } else {
-              showToast('無効なファイル形式です。');
-            }
-          } catch (err) {
-            showToast('ファイルの読み込みに失敗しました。');
-          }
-          if (fileInputRef.current) fileInputRef.current.value = '';
-        };
-      };
-
       // ルーム接続 & リアルタイム同期監視
       useEffect(() => {
         if (!isAuthenticated) return;
@@ -1283,16 +1178,15 @@
         updateUrlRoomParam(roomKey);
 
         const cached = loadFromLocalStorage(roomKey);
-        if (cached && cached.treeData) {
-          setTreeData(cached.treeData);
-          if (cached.timelineStartHour !== undefined) setTimelineStartHour(cached.timelineStartHour);
-          if (cached.timelineEndHour !== undefined) setTimelineEndHour(cached.timelineEndHour);
+        if (cached) {
+          setWorkspace(cached);
         }
 
         if (!db) {
           if (!cached) {
-            setTreeData(initialTreeData);
-            saveToLocalStorage(roomKey, initialTreeData, 0, 24);
+            const defWs = createDefaultWorkspace();
+            setWorkspace(defWs);
+            saveToLocalStorage(roomKey, defWs);
           }
           setSyncStatus('local');
           return;
@@ -1316,48 +1210,43 @@
             unsubscribe = onSnapshot(docRef, (snapshot) => {
               if (snapshot.exists()) {
                 const data = snapshot.data();
-                if (data.updatedBy !== CLIENT_ID || !treeData) {
-                  if (data.treeData) setTreeData(data.treeData);
-                  if (data.timelineStartHour !== undefined) setTimelineStartHour(data.timelineStartHour);
-                  if (data.timelineEndHour !== undefined) setTimelineEndHour(data.timelineEndHour);
-                  saveToLocalStorage(roomKey, data.treeData || initialTreeData, data.timelineStartHour ?? 0, data.timelineEndHour ?? 24);
+                if (data.updatedBy !== CLIENT_ID || !workspaceRef.current) {
+                  const normalized = normalizeWorkspaceData(data);
+                  setWorkspace(normalized);
+                  saveToLocalStorage(roomKey, normalized);
                 }
                 setSyncStatus('synced');
               } else {
-                const seedTree = cached?.treeData || initialTreeData;
-                const seedStart = cached?.timelineStartHour ?? 0;
-                const seedEnd = cached?.timelineEndHour ?? 24;
+                const seedWs = cached || createDefaultWorkspace();
                 setDoc(docRef, {
-                  treeData: seedTree,
-                  timelineStartHour: seedStart,
-                  timelineEndHour: seedEnd,
+                  ...seedWs,
                   updatedAt: Date.now(),
                   updatedBy: CLIENT_ID
                 }).catch(e => console.warn("Doc init warn:", e));
-                setTreeData(seedTree);
-                saveToLocalStorage(roomKey, seedTree, seedStart, seedEnd);
+                setWorkspace(seedWs);
+                saveToLocalStorage(roomKey, seedWs);
                 setSyncStatus('synced');
               }
             }, (error) => {
               console.warn("Snapshot error:", error);
               setSyncStatus('local');
-              setTreeData(prev => prev || cached?.treeData || initialTreeData);
+              setWorkspace(prev => prev || cached || createDefaultWorkspace());
             });
           } catch (err) {
             console.warn("Connect error:", err);
             setSyncStatus('local');
-            setTreeData(prev => prev || cached?.treeData || initialTreeData);
+            setWorkspace(prev => prev || cached || createDefaultWorkspace());
           }
         };
 
         connectAndListen();
-
         return () => unsubscribe();
       }, [roomId, isAuthenticated]);
 
-      const syncToCloudAndLocal = (nextTree, nextStart, nextEnd) => {
+      const syncToCloudAndLocal = useCallback((nextWorkspace) => {
+        const cleanWs = normalizeWorkspaceData(nextWorkspace);
         const roomKey = roomId.trim() || 'default-room';
-        saveToLocalStorage(roomKey, nextTree, nextStart, nextEnd);
+        saveToLocalStorage(roomKey, cleanWs);
 
         if (!db) return;
         setSyncStatus('saving');
@@ -1366,9 +1255,7 @@
           try {
             const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'story_branches', roomKey);
             setDoc(docRef, {
-              treeData: nextTree,
-              timelineStartHour: nextStart,
-              timelineEndHour: nextEnd,
+              ...cleanWs,
               updatedAt: Date.now(),
               updatedBy: CLIENT_ID
             }).then(() => {
@@ -1383,37 +1270,684 @@
             setSyncStatus('local');
           }
         }, 300);
-      };
+      }, [roomId]);
 
-      const dispatchTreeUpdate = (updater) => {
-        setTreeData(prev => {
+      // ワークスペース全体を更新する共通ディスパッチャー
+      const dispatchWorkspaceUpdate = useCallback((updater, options = {}) => {
+        const { recordHistory = true } = options;
+        setWorkspace(prev => {
+          if (!prev) return prev;
           const next = typeof updater === 'function' ? updater(prev) : updater;
-          syncToCloudAndLocal(next, timelineStartHour, timelineEndHour);
+          if (next === prev) return prev;
+          if (recordHistory) {
+            setPastHistory(h => [...h.slice(-(MAX_HISTORY - 1)), prev]);
+            setFutureHistory([]);
+          }
+          syncToCloudAndLocal(next);
           return next;
         });
+      }, [syncToCloudAndLocal]);
+
+      // アクティブなタイムラインの treeData のみを更新するヘルパー
+      const dispatchTreeUpdate = useCallback((treeUpdater, options = {}) => {
+        dispatchWorkspaceUpdate(prev => {
+          const targetId = prev.activeTimelineId;
+          const nextTimelines = prev.timelines.map(tl => {
+            if (tl.id !== targetId) return tl;
+            const nextTree = typeof treeUpdater === 'function' ? treeUpdater(tl.treeData) : treeUpdater;
+            return { ...tl, treeData: nextTree };
+          });
+          return { ...prev, timelines: nextTimelines };
+        }, options);
+      }, [dispatchWorkspaceUpdate]);
+
+      // Undo / Redo
+      const handleUndo = useCallback(() => {
+        setPastHistory(prevPast => {
+          if (prevPast.length === 0) return prevPast;
+          const previousWs = prevPast[prevPast.length - 1];
+          const newPast = prevPast.slice(0, -1);
+          if (workspaceRef.current) {
+            setFutureHistory(prevFuture => [workspaceRef.current, ...prevFuture.slice(0, MAX_HISTORY - 1)]);
+          }
+          setWorkspace(previousWs);
+          syncToCloudAndLocal(previousWs);
+          showToast('元に戻しました');
+          return newPast;
+        });
+      }, [syncToCloudAndLocal, showToast]);
+
+      const handleRedo = useCallback(() => {
+        setFutureHistory(prevFuture => {
+          if (prevFuture.length === 0) return prevFuture;
+          const nextWs = prevFuture[0];
+          const newFuture = prevFuture.slice(1);
+          if (workspaceRef.current) {
+            setPastHistory(prevPast => [...prevPast.slice(-(MAX_HISTORY - 1)), workspaceRef.current]);
+          }
+          setWorkspace(nextWs);
+          syncToCloudAndLocal(nextWs);
+          showToast('やり直しました');
+          return newFuture;
+        });
+      }, [syncToCloudAndLocal, showToast]);
+
+      // キーボードショートカット (Ctrl+Z / Ctrl+Y)
+      useEffect(() => {
+        if (!isAuthenticated) return;
+        const handleKeyDown = (e) => {
+          const tag = e.target.tagName;
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+            e.preventDefault();
+            if (e.shiftKey) handleRedo();
+            else handleUndo();
+          } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+            e.preventDefault();
+            handleRedo();
+          }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+      }, [isAuthenticated, handleUndo, handleRedo]);
+
+      // Ctrl + ホイールズーム
+      useEffect(() => {
+        const el = mainScrollRef.current;
+        if (!el) return;
+        const handleWheel = (e) => {
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            const delta = e.deltaY < 0 ? 0.1 : -0.1;
+            setZoom(prev => Math.min(1.5, Math.max(0.5, Math.round((prev + delta) * 10) / 10)));
+          }
+        };
+        el.addEventListener('wheel', handleWheel, { passive: false });
+        return () => el.removeEventListener('wheel', handleWheel);
+      }, [isAuthenticated, activeMainTab, workspace !== null]);
+
+      // ========================================================================
+      // ★ タイムラインVer 管理ハンドラー
+      // ========================================================================
+      const handleSwitchTimeline = (tlId) => {
+        dispatchWorkspaceUpdate(prev => ({ ...prev, activeTimelineId: tlId }), { recordHistory: false });
+        setActiveMainTab('timeline');
+      };
+
+      const openCreateVersionModal = () => {
+        const nextNum = (workspace?.timelines?.length || 1) + 1;
+        setVersionModal({
+          isOpen: true,
+          mode: 'create',
+          targetId: null,
+          name: `Ver ${nextNum}.0`,
+          baseMode: 'clone'
+        });
+      };
+
+      const openRenameVersionModal = (tl) => {
+        setVersionModal({
+          isOpen: true,
+          mode: 'rename',
+          targetId: tl.id,
+          name: tl.name,
+          baseMode: 'blank'
+        });
+      };
+
+      const openDeleteVersionModal = (tl) => {
+        setVersionModal({
+          isOpen: true,
+          mode: 'delete',
+          targetId: tl.id,
+          name: tl.name,
+          baseMode: 'blank'
+        });
+      };
+
+      const handleConfirmVersionModal = (e) => {
+        e?.preventDefault();
+        if (!workspace) return;
+
+        if (versionModal.mode === 'create') {
+          const trimmed = versionModal.name.trim() || `Ver ${workspace.timelines.length + 1}.0`;
+          const newId = generateId('tl');
+          const baseTree = versionModal.baseMode === 'clone' && activeTimeline
+            ? JSON.parse(JSON.stringify(sanitizeTree(activeTimeline.treeData)))
+            : createBlankTreeData(trimmed);
+          const newTl = {
+            id: newId,
+            name: trimmed,
+            treeData: baseTree,
+            timelineStartHour: activeTimeline?.timelineStartHour ?? 0,
+            timelineEndHour: activeTimeline?.timelineEndHour ?? 24
+          };
+          dispatchWorkspaceUpdate(prev => ({
+            ...prev,
+            timelines: [...prev.timelines, newTl],
+            activeTimelineId: newId
+          }));
+          showToast(`タイムライン「${trimmed}」を作成しました`);
+        } else if (versionModal.mode === 'rename') {
+          const trimmed = versionModal.name.trim();
+          if (!trimmed) return;
+          dispatchWorkspaceUpdate(prev => ({
+            ...prev,
+            timelines: prev.timelines.map(t => t.id === versionModal.targetId ? { ...t, name: trimmed } : t)
+          }));
+          showToast(`バージョン名を「${trimmed}」に変更しました`);
+        } else if (versionModal.mode === 'delete') {
+          if (workspace.timelines.length <= 1) {
+            showToast('最後の1つのタイムラインは削除できません');
+            return;
+          }
+          dispatchWorkspaceUpdate(prev => {
+            const remaining = prev.timelines.filter(t => t.id !== versionModal.targetId);
+            const nextActive = prev.activeTimelineId === versionModal.targetId ? remaining[0].id : prev.activeTimelineId;
+            return { ...prev, timelines: remaining, activeTimelineId: nextActive };
+          });
+          showToast(`タイムライン「${versionModal.name}」を削除しました`);
+        }
+
+        setVersionModal({ isOpen: false, mode: 'create', targetId: null, name: '', baseMode: 'clone' });
+      };
+
+      // ========================================================================
+      // ★ 活用機能マスター管理ハンドラー
+      // ========================================================================
+      const handleAddMasterFeatures = (rawText) => {
+        const added = parseFeatures(rawText);
+        if (added.length === 0) return;
+        dispatchWorkspaceUpdate(prev => ({
+          ...prev,
+          masterFeatures: Array.from(new Set([...(prev.masterFeatures || []), ...added]))
+        }));
+        setMasterFeatureInput('');
+        showToast(`活用機能（${added.join(', ')}）を登録しました`);
+      };
+
+      const handleRenameMasterFeature = (oldName, newName) => {
+        const trimmed = newName.trim();
+        if (!trimmed || trimmed === oldName) {
+          setEditingMasterFeat(null);
+          return;
+        }
+        dispatchWorkspaceUpdate(prev => ({
+          ...prev,
+          masterFeatures: Array.from(new Set((prev.masterFeatures || []).map(f => f === oldName ? trimmed : f))),
+          timelines: prev.timelines.map(tl => ({
+            ...tl,
+            treeData: renameFeatureInTree(tl.treeData, oldName, trimmed)
+          })),
+          situationStocks: (prev.situationStocks || []).map(st => ({
+            ...st,
+            features: Array.from(new Set((st.features || []).map(f => f === oldName ? trimmed : f)))
+          }))
+        }));
+        setEditingMasterFeat(null);
+        showToast(`機能名を「${trimmed}」に変更しました`);
+      };
+
+      const handleDeleteMasterFeature = (targetName) => {
+        dispatchWorkspaceUpdate(prev => ({
+          ...prev,
+          masterFeatures: (prev.masterFeatures || []).filter(f => f !== targetName),
+          timelines: prev.timelines.map(tl => ({
+            ...tl,
+            treeData: deleteFeatureFromTree(tl.treeData, targetName)
+          })),
+          situationStocks: (prev.situationStocks || []).map(st => ({
+            ...st,
+            features: (st.features || []).filter(f => f !== targetName)
+          }))
+        }));
+        showToast(`活用機能「${targetName}」を削除しました`);
+      };
+
+      // ========================================================================
+      // ★ シチュエーションストック管理ハンドラー
+      // ========================================================================
+      const openCreateStockModal = () => {
+        setStockForm({
+          title: '',
+          description: '',
+          features: [],
+          aiWith: '',
+          aiWithout: '',
+          color: 'bg-blue-50',
+          durationMin: 30
+        });
+        setStockModal({ isOpen: true, editId: null });
+      };
+
+      const openEditStockModal = (stock) => {
+        setStockForm({
+          title: stock.title || '',
+          description: stock.description || '',
+          features: parseFeatures(stock.features),
+          aiWith: stock.aiWith || '',
+          aiWithout: stock.aiWithout || '',
+          color: stock.color || 'bg-blue-50',
+          durationMin: stock.durationMin || 30
+        });
+        setStockModal({ isOpen: true, editId: stock.id });
+      };
+
+      const handleSaveStock = (e) => {
+        e.preventDefault();
+        const title = stockForm.title.trim() || '無題のシチュエーション';
+        const durationMin = Math.max(15, Number(stockForm.durationMin) || 30);
+
+        if (stockModal.editId) {
+          dispatchWorkspaceUpdate(prev => ({
+            ...prev,
+            situationStocks: (prev.situationStocks || []).map(st =>
+              st.id === stockModal.editId
+                ? { ...st, ...stockForm, title, durationMin }
+                : st
+            )
+          }));
+          showToast(`ストック「${title}」を更新しました`);
+        } else {
+          const newStock = {
+            id: generateId('stock'),
+            ...stockForm,
+            title,
+            durationMin
+          };
+          dispatchWorkspaceUpdate(prev => ({
+            ...prev,
+            situationStocks: [...(prev.situationStocks || []), newStock]
+          }));
+          showToast(`ストック「${title}」を追加しました`);
+        }
+        setStockModal({ isOpen: false, editId: null });
+      };
+
+      const handleDeleteStock = (stockId) => {
+        dispatchWorkspaceUpdate(prev => ({
+          ...prev,
+          situationStocks: (prev.situationStocks || []).filter(st => st.id !== stockId)
+        }));
+        showToast('シチュエーションストックを削除しました');
+      };
+
+      const handleInsertStockToTimeline = (stock) => {
+        if (!treeData) return;
+        const parentId = stockInsertTarget[stock.id] || treeData.id;
+        const parentInfo = flatActiveNodes.find(n => n.id === parentId) || flatActiveNodes[0];
+        const startTime = parentInfo?.endTime || '09:00';
+        const endTime = minutesToTime(timeToMinutes(startTime) + (stock.durationMin || 30));
+
+        const newNode = {
+          id: generateId('node'),
+          title: stock.title,
+          description: stock.description || '',
+          features: parseFeatures(stock.features),
+          aiWith: stock.aiWith || '',
+          aiWithout: stock.aiWithout || '',
+          color: stock.color || 'bg-white',
+          startTime,
+          endTime,
+          children: []
+        };
+
+        dispatchTreeUpdate(prev => addNodeToTree(prev, parentId, newNode));
+        setActiveMainTab('timeline');
+        showToast(`「${stock.title}」を「${parentInfo?.title || 'ルート'}」の配下に追加しました`);
+      };
+
+      // ========================================================================
+      // ★ ツリー操作・エクスポート・ドラッグハンドラー
+      // ========================================================================
+      const handleExportCSV = () => {
+        if (!treeData) return;
+        const rows = [
+          ['階層パス', '分岐タイトル', '開始時間', '終了時間', '概要・シチュエーション', '活用機能', '🟢 AIあり(〇〇さん)', '🔴 AIなし(××さん)']
+        ];
+
+        const traverse = (node, parentPath = '') => {
+          const currentPath = parentPath ? `${parentPath} > ${node.title}` : node.title;
+          const feats = parseFeatures(node.features || node.feature).join(', ');
+          rows.push([
+            `"${currentPath.replace(/"/g, '""')}"`,
+            `"${(node.title || '').replace(/"/g, '""')}"`,
+            `"${node.startTime || ''}"`,
+            `"${node.endTime || ''}"`,
+            `"${(node.description || '').replace(/"/g, '""')}"`,
+            `"${feats.replace(/"/g, '""')}"`,
+            `"${(node.aiWith || '').replace(/"/g, '""')}"`,
+            `"${(node.aiWithout || '').replace(/"/g, '""')}"`
+          ]);
+          if (node.children) node.children.forEach(child => traverse(child, currentPath));
+        };
+
+        traverse(treeData);
+
+        const csvContent = '\uFEFF' + rows.map(r => r.join(',')).join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', `parallel_${roomId}_${activeTimeline?.name || 'v1'}_${new Date().toISOString().slice(0, 10)}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        showToast('スプレッドシート用CSVファイルを出力しました。');
+      };
+
+      const handleExportImage = () => {
+        if (!treeData) return;
+        const layout = computeTreeLayout(treeData, timelineStartHour);
+
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        layout.nodes.forEach(item => {
+          if (item.x < minX) minX = item.x;
+          if (item.x + item.width > maxX) maxX = item.x + item.width;
+          if (item.y - item.height / 2 < minY) minY = item.y - item.height / 2;
+          if (item.y + item.height / 2 > maxY) maxY = item.y + item.height / 2;
+        });
+
+        if (!isFinite(minX)) { minX = 0; maxX = 800; minY = 0; maxY = 600; }
+
+        const padX = 48, rulerHeight = 44, padTop = 28, padBottom = 48;
+        const width = Math.max(640, (maxX - minX) + padX * 2);
+        const height = Math.max(420, rulerHeight + (maxY - minY) + padTop + padBottom);
+        const scale = Math.min(2.5, 8192 / Math.max(width, height));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(width * scale);
+        canvas.height = Math.round(height * scale);
+        const ctx = canvas.getContext('2d');
+        ctx.scale(scale, scale);
+
+        const fontSans = '-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif';
+        const fontMono = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+
+        ctx.fillStyle = '#f1f5f9';
+        ctx.fillRect(0, 0, width, height);
+
+        const toCanvasX = (x) => x - minX + padX;
+        const toCanvasY = (y) => y - minY + rulerHeight + padTop;
+
+        const startHourVisible = Math.max(timelineStartHour, Math.floor((minX - 60) / PIXELS_PER_HOUR) + timelineStartHour);
+        const endHourVisible = Math.min(timelineEndHour, Math.ceil((maxX - 60) / PIXELS_PER_HOUR) + timelineStartHour + 1);
+
+        for (let hour = startHourVisible; hour <= endHourVisible; hour++) {
+          const gx = toCanvasX((hour - timelineStartHour) * PIXELS_PER_HOUR + 60);
+          ctx.strokeStyle = 'rgba(203, 213, 225, 0.55)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(gx, rulerHeight);
+          ctx.lineTo(gx, height);
+          ctx.stroke();
+        }
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, rulerHeight);
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(0, rulerHeight);
+        ctx.lineTo(width, rulerHeight);
+        ctx.stroke();
+
+        ctx.font = `700 12px ${fontMono}`;
+        for (let hour = startHourVisible; hour <= endHourVisible; hour++) {
+          const rx = toCanvasX((hour - timelineStartHour) * PIXELS_PER_HOUR + 60);
+          ctx.strokeStyle = '#cbd5e1';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(rx, 0);
+          ctx.lineTo(rx, rulerHeight);
+          ctx.stroke();
+          ctx.fillStyle = '#475569';
+          ctx.fillText(`${String(hour).padStart(2, '0')}:00`, rx + 8, 27);
+        }
+
+        layout.links.forEach(link => {
+          const sx = toCanvasX(link.startX), sy = toCanvasY(link.startY);
+          const ex = toCanvasX(link.endX), ey = toCanvasY(link.endY);
+          const c1x = sx + Math.max(30, (ex - sx) / 2);
+          const c2x = ex - Math.max(30, (ex - sx) / 2);
+
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.bezierCurveTo(c1x, sy, c2x, ey, ex, ey);
+          ctx.strokeStyle = getColorStroke(link.colorClass);
+          ctx.lineWidth = 4;
+          ctx.lineCap = 'round';
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.bezierCurveTo(c1x, sy, c2x, ey, ex, ey);
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 4]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        });
+
+        layout.nodes.forEach(item => {
+          const { node, width: w, height: h } = item;
+          const x = toCanvasX(item.x);
+          const y = toCanvasY(item.y - h / 2);
+          const innerW = w - 28;
+
+          ctx.save();
+          ctx.fillStyle = getCardFillColor(node.color);
+          ctx.shadowColor = 'rgba(15, 23, 42, 0.08)';
+          ctx.shadowBlur = 10;
+          ctx.shadowOffsetY = 3;
+          ctx.beginPath();
+          ctx.roundRect(x, y, w, h, 16);
+          ctx.fill();
+          ctx.restore();
+
+          ctx.strokeStyle = '#cbd5e1';
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.roundRect(x, y, w, h, 16);
+          ctx.stroke();
+
+          let cursorY = y + 22;
+          ctx.fillStyle = '#0f172a';
+          ctx.font = `800 13.5px ${fontSans}`;
+          const titleLines = wrapCanvasText(ctx, node.title || '無題', innerW - 82).slice(0, 2);
+          titleLines.forEach((line, i) => ctx.fillText(line, x + 14, cursorY + i * 17));
+
+          const timeLabel = `${node.startTime || '09:00'}-${node.endTime || '09:30'}`;
+          ctx.font = `700 10px ${fontMono}`;
+          const badgeW = Math.max(76, ctx.measureText(timeLabel).width + 12);
+          ctx.fillStyle = 'rgba(15, 23, 42, 0.06)';
+          ctx.beginPath();
+          ctx.roundRect(x + w - badgeW - 12, y + 11, badgeW, 20, 5);
+          ctx.fill();
+          ctx.fillStyle = '#334155';
+          ctx.fillText(timeLabel, x + w - badgeW - 6, y + 24.5);
+
+          cursorY += Math.max(titleLines.length * 17, 22) + 4;
+          ctx.strokeStyle = 'rgba(15, 23, 42, 0.1)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(x + 14, cursorY);
+          ctx.lineTo(x + w - 14, cursorY);
+          ctx.stroke();
+          cursorY += 14;
+
+          if (node.description) {
+            ctx.fillStyle = '#475569';
+            ctx.font = `500 11.5px ${fontSans}`;
+            wrapCanvasText(ctx, node.description, innerW).forEach(line => {
+              if (cursorY + 15 < y + h - 36) {
+                ctx.fillText(line, x + 14, cursorY);
+                cursorY += 15.5;
+              }
+            });
+            cursorY += 4;
+          }
+
+          if (node.aiWith) {
+            ctx.font = `500 11px ${fontSans}`;
+            const withLines = wrapCanvasText(ctx, node.aiWith, innerW - 16);
+            const boxH = 22 + withLines.length * 14.5;
+            if (cursorY + boxH < y + h - 32) {
+              ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+              ctx.beginPath();
+              ctx.roundRect(x + 14, cursorY, innerW, boxH, 8);
+              ctx.fill();
+              ctx.strokeStyle = 'rgba(16, 185, 129, 0.35)';
+              ctx.lineWidth = 1;
+              ctx.stroke();
+              ctx.fillStyle = '#047857';
+              ctx.font = `700 11px ${fontSans}`;
+              ctx.fillText('🟢 AIあり (〇〇さん)', x + 22, cursorY + 14);
+              ctx.fillStyle = '#334155';
+              ctx.font = `500 11px ${fontSans}`;
+              withLines.forEach((line, idx) => ctx.fillText(line, x + 22, cursorY + 29 + idx * 14.5));
+              cursorY += boxH + 7;
+            }
+          }
+
+          if (node.aiWithout) {
+            ctx.font = `500 11px ${fontSans}`;
+            const withoutLines = wrapCanvasText(ctx, node.aiWithout, innerW - 16);
+            const boxH = 22 + withoutLines.length * 14.5;
+            if (cursorY + boxH < y + h - 32) {
+              ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+              ctx.beginPath();
+              ctx.roundRect(x + 14, cursorY, innerW, boxH, 8);
+              ctx.fill();
+              ctx.strokeStyle = 'rgba(244, 63, 94, 0.35)';
+              ctx.lineWidth = 1;
+              ctx.stroke();
+              ctx.fillStyle = '#be123c';
+              ctx.font = `700 11px ${fontSans}`;
+              ctx.fillText('🔴 AIなし (××さん)', x + 22, cursorY + 14);
+              ctx.fillStyle = '#334155';
+              ctx.font = `500 11px ${fontSans}`;
+              withoutLines.forEach((line, idx) => ctx.fillText(line, x + 22, cursorY + 29 + idx * 14.5));
+              cursorY += boxH + 8;
+            }
+          }
+
+          const feats = parseFeatures(node.features || node.feature);
+          if (feats.length > 0) {
+            let tagX = x + 14;
+            let tagY = Math.max(cursorY + 2, y + h - 30);
+            ctx.font = `700 10px ${fontSans}`;
+            feats.forEach(f => {
+              const tw = ctx.measureText(f).width + 14;
+              if (tagX + tw > x + w - 14 && tagX > x + 14) {
+                tagX = x + 14;
+                tagY += 22;
+              }
+              if (tagY + 18 <= y + h - 10) {
+                ctx.fillStyle = '#eef2ff';
+                ctx.beginPath();
+                ctx.roundRect(tagX, tagY, tw, 18, 5);
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(129, 140, 248, 0.45)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                ctx.fillStyle = '#4338ca';
+                ctx.fillText(f, tagX + 7, tagY + 12.5);
+                tagX += tw + 6;
+              }
+            });
+          }
+        });
+
+        const link = document.createElement('a');
+        link.href = canvas.toDataURL('image/png');
+        link.setAttribute('download', `parallel_${roomId}_${activeTimeline?.name || 'v1'}_${new Date().toISOString().slice(0, 10)}.png`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        showToast('最適化された高画質PNGを出力しました。');
+      };
+
+      const handleExportJSON = () => {
+        if (!workspace) return;
+        const exportObject = {
+          version: '2.0',
+          roomId,
+          ...normalizeWorkspaceData(workspace)
+        };
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(exportObject, null, 2));
+        const downloadAnchor = document.createElement('a');
+        downloadAnchor.setAttribute("href", dataStr);
+        downloadAnchor.setAttribute("download", `parallel_backup_${roomId}_${new Date().toISOString().slice(0, 10)}.json`);
+        document.body.appendChild(downloadAnchor);
+        downloadAnchor.click();
+        downloadAnchor.remove();
+        showToast('全バージョン・ストックを含むJSONを保存しました。');
+      };
+
+      const handleImportJSON = (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const fileReader = new FileReader();
+        fileReader.readAsText(file, "UTF-8");
+        fileReader.onload = (event) => {
+          try {
+            const parsed = JSON.parse(event.target.result);
+            const normalized = normalizeWorkspaceData(parsed);
+            dispatchWorkspaceUpdate(normalized);
+            showToast('保存ファイルからデータを復元・自動保存しました。');
+          } catch (err) {
+            showToast('ファイルの読み込みに失敗しました。');
+          }
+          if (fileInputRef.current) fileInputRef.current.value = '';
+        };
       };
 
       const updateFormAndAutoSave = (updatedFields) => {
         setFormData(prevForm => {
           const nextForm = { ...prevForm, ...updatedFields };
+
+          if ('startTime' in updatedFields && nextForm.startTime) {
+            const sMin = timeToMinutes(nextForm.startTime);
+            const eMin = timeToMinutes(nextForm.endTime);
+            if (eMin <= sMin) nextForm.endTime = minutesToTime(Math.min(23 * 60 + 59, sMin + 15));
+          } else if ('endTime' in updatedFields && nextForm.endTime) {
+            const sMin = timeToMinutes(nextForm.startTime);
+            const eMin = timeToMinutes(nextForm.endTime);
+            if (eMin <= sMin) nextForm.startTime = minutesToTime(Math.max(0, eMin - 15));
+          }
+
           if (modalState.isOpen && modalState.type === 'edit' && modalState.targetNodeId) {
-            dispatchTreeUpdate(prevTree => updateNodeInTree(prevTree, modalState.targetNodeId, {
-              title: nextForm.title || '無題の分岐',
-              description: nextForm.description,
-              features: nextForm.features,
-              aiWith: nextForm.aiWith,
-              aiWithout: nextForm.aiWithout,
-              color: nextForm.color,
-              startTime: nextForm.startTime,
-              endTime: nextForm.endTime
-            }));
+            const shouldRecord = !modalHistoryRecordedRef.current;
+            modalHistoryRecordedRef.current = true;
+            dispatchWorkspaceUpdate(prev => {
+              const nextTimelines = prev.timelines.map(tl => {
+                if (tl.id !== prev.activeTimelineId) return tl;
+                return {
+                  ...tl,
+                  treeData: updateNodeInTree(tl.treeData, modalState.targetNodeId, {
+                    title: nextForm.title || '無題の分岐',
+                    description: nextForm.description,
+                    features: nextForm.features,
+                    aiWith: nextForm.aiWith,
+                    aiWithout: nextForm.aiWithout,
+                    color: nextForm.color,
+                    startTime: nextForm.startTime,
+                    endTime: nextForm.endTime
+                  })
+                };
+              });
+              const nextMaster = Array.from(new Set([...(prev.masterFeatures || []), ...(nextForm.features || [])]));
+              return { ...prev, timelines: nextTimelines, masterFeatures: nextMaster };
+            }, { recordHistory: shouldRecord });
           }
           return nextForm;
         });
       };
 
       const handleAddClick = (parentNode) => {
-        const newId = generateId();
+        const newId = generateId('node');
         const defaultStart = parentNode.endTime || '09:30';
         const defaultEnd = minutesToTime(timeToMinutes(defaultStart) + 30);
         const newNode = {
@@ -1430,6 +1964,7 @@
         };
 
         dispatchTreeUpdate(prev => addNodeToTree(prev, parentNode.id, newNode));
+        modalHistoryRecordedRef.current = true;
 
         setFormData({
           title: newNode.title,
@@ -1448,6 +1983,7 @@
 
       const handleEditClick = (node) => {
         const currentFeatures = parseFeatures(node.features || node.feature);
+        modalHistoryRecordedRef.current = false;
         setFormData({
           title: node.title,
           description: node.description || '',
@@ -1463,9 +1999,7 @@
         setModalState({ isOpen: true, type: 'edit', targetNodeId: node.id });
       };
 
-      const handleDeleteClick = (nodeId) => {
-        setModalState({ isOpen: true, type: 'delete', targetNodeId: nodeId });
-      };
+      const handleDeleteClick = (nodeId) => setModalState({ isOpen: true, type: 'delete', targetNodeId: nodeId });
 
       const handleConfirmDelete = () => {
         if (modalState.targetNodeId) {
@@ -1486,268 +2020,403 @@
         showToast(`「${copiedNode.title}」を「${targetParentNode.title}」の配下に複製しました。`);
       };
 
-      const handleReorderClick = (nodeId, dir) => {
-        dispatchTreeUpdate(prev => reorderSiblingInTree(prev, nodeId, dir));
-      };
-
-      const handlePromoteClick = (nodeId) => {
-        dispatchTreeUpdate(prev => promoteNodeInTree(prev, nodeId));
-      };
-
-      const handleDemoteClick = (nodeId) => {
-        dispatchTreeUpdate(prev => demoteNodeInTree(prev, nodeId));
-      };
+      const handleReorderClick = (nodeId, dir) => dispatchTreeUpdate(prev => reorderSiblingInTree(prev, nodeId, dir));
+      const handlePromoteClick = (nodeId) => dispatchTreeUpdate(prev => promoteNodeInTree(prev, nodeId));
+      const handleDemoteClick = (nodeId) => dispatchTreeUpdate(prev => demoteNodeInTree(prev, nodeId));
 
       const scrollHorizontal = (offset) => {
-        if (mainScrollRef.current) {
-          mainScrollRef.current.scrollBy({ left: offset, behavior: 'smooth' });
-        }
+        if (mainScrollRef.current) mainScrollRef.current.scrollBy({ left: offset, behavior: 'smooth' });
       };
 
+      // カードドラッグ
       const handlePointerDown = (e, node) => {
         if (e.target.closest('button') || e.target.closest('input')) return;
-        e.target.setPointerCapture(e.pointerId);
+        e.stopPropagation();
+        e.currentTarget.setPointerCapture(e.pointerId);
 
         const startMin = timeToMinutes(node.startTime || '09:00');
         const endMin = timeToMinutes(node.endTime || '09:30');
 
-        setDragState({ 
-          id: node.id, 
-          startX: e.clientX, 
+        setDragState({
+          id: node.id,
+          startX: e.clientX,
           origStartMin: startMin,
-          origDuration: endMin - startMin
+          origDuration: Math.max(15, endMin - startMin),
+          previewStartTime: minutesToTime(startMin),
+          previewEndTime: minutesToTime(Math.max(startMin + 15, endMin))
         });
       };
 
       const handlePointerMove = (e) => {
         if (!dragState) return;
         const deltaX = (e.clientX - dragState.startX) / zoom;
-        const rawDeltaMinutes = (deltaX / PIXELS_PER_HOUR) * 60;
-        const deltaMinutes = Math.round(rawDeltaMinutes / 15) * 15;
+        const deltaMinutes = Math.round(((deltaX / PIXELS_PER_HOUR) * 60) / 15) * 15;
 
-        let newStartMin = dragState.origStartMin + deltaMinutes;
-        newStartMin = Math.max(0, Math.min(24 * 60 - dragState.origDuration, newStartMin));
+        let newStartMin = Math.max(0, Math.min(24 * 60 - dragState.origDuration, dragState.origStartMin + deltaMinutes));
         newStartMin = Math.round(newStartMin / 15) * 15;
-        const newEndMin = newStartMin + dragState.origDuration;
+        const nextStartStr = minutesToTime(newStartMin);
+        const nextEndStr = minutesToTime(newStartMin + dragState.origDuration);
 
-        dispatchTreeUpdate(prev => updateNodeInTree(prev, dragState.id, { 
-          startTime: minutesToTime(newStartMin), 
-          endTime: minutesToTime(newEndMin) 
-        }));
+        if (nextStartStr !== dragState.previewStartTime || nextEndStr !== dragState.previewEndTime) {
+          setDragState(prev => prev ? { ...prev, previewStartTime: nextStartStr, previewEndTime: nextEndStr } : null);
+        }
       };
 
       const handlePointerUp = (e) => {
         if (dragState) {
-          e.target.releasePointerCapture(e.pointerId);
+          if (e.currentTarget.hasPointerCapture?.(e.pointerId)) {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+          }
+          if (dragState.previewStartTime !== minutesToTime(dragState.origStartMin)) {
+            const { id, previewStartTime, previewEndTime } = dragState;
+            dispatchTreeUpdate(prev => updateNodeInTree(prev, id, {
+              startTime: previewStartTime,
+              endTime: previewEndTime
+            }));
+          }
           setDragState(null);
         }
       };
 
-      const closeModal = () => {
-        setModalState({ isOpen: false, type: '', targetNodeId: null });
+      // 背景パン移動
+      const handleCanvasPointerDown = (e) => {
+        if (e.button !== 0) return;
+        if (e.target.closest('[data-node-card="true"]') || e.target.closest('button')) return;
+        const el = mainScrollRef.current;
+        if (!el) return;
+        setPanState({ startX: e.clientX, startY: e.clientY, scrollLeft: el.scrollLeft, scrollTop: el.scrollTop });
       };
 
-      if (!isAuthenticated) {
+      const handleCanvasPointerMove = (e) => {
+        if (!panState || !mainScrollRef.current) return;
+        mainScrollRef.current.scrollLeft = panState.scrollLeft - (e.clientX - panState.startX);
+        mainScrollRef.current.scrollTop = panState.scrollTop - (e.clientY - panState.startY);
+      };
+
+      const handleCanvasPointerUp = () => {
+        if (panState) setPanState(null);
+      };
+
+      const closeModal = () => setModalState({ isOpen: false, type: '', targetNodeId: null });
+
+      // === PART 2 END (この直下にパート3を貼り付けてください) ===
+    if (!isAuthenticated) {
         return <LoginScreen onAuthenticated={() => setIsAuthenticated(true)} />;
       }
 
-      if (!treeData) return <div className="p-8 text-center text-slate-500">読み込み中...</div>;
+      if (!workspace || !treeData) {
+        return <div className="p-8 text-center text-slate-500">読み込み中...</div>;
+      }
 
-      const layout = computeTreeLayout(treeData, timelineStartHour);
+      const layout = computeTreeLayout(treeData, timelineStartHour, dragState);
       const totalHours = Math.max(1, timelineEndHour - timelineStartHour);
       const canvasWidth = totalHours * PIXELS_PER_HOUR + 120;
-      const registeredFeatures = getAllFeaturesFromTree(treeData);
+      const situationStocks = workspace.situationStocks || [];
 
       return (
         <div className="h-screen w-screen max-h-screen max-w-screen bg-slate-100 flex flex-col font-sans overflow-hidden">
-          <input 
-            type="file" 
-            ref={fileInputRef} 
-            onChange={handleImportJSON} 
-            accept=".json" 
-            className="hidden" 
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleImportJSON}
+            accept=".json"
+            className="hidden"
           />
 
           {/* Top Header */}
-          <header className="bg-white border-b border-slate-200 px-4 py-3 sm:px-6 sm:py-3.5 flex flex-wrap items-center justify-between gap-3 shrink-0 shadow-sm z-40 relative">
-            <div>
-              <h1 className="text-base sm:text-lg font-extrabold text-slate-800 tracking-tight flex items-center gap-2">
-                Parallel
-                <span className="text-[10px] font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">v1.0 AutoSave</span>
-              </h1>
-              <div className="text-[11px] text-slate-500 mt-1 flex flex-wrap items-center gap-2">
-                {syncStatus === 'synced' ? (
-                  <button 
-                    onClick={() => {
-                      setInputRoomId(roomId);
-                      setIsRoomModalOpen(true);
-                    }}
-                    className="text-emerald-700 font-bold bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded flex items-center gap-1.5 transition-colors"
-                    title="クリックして合言葉（ルームID）を変更"
-                  >
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                    <span>リアルタイム同期中 (合言葉: {roomId})</span>
-                  </button>
-                ) : syncStatus === 'saving' ? (
-                  <span className="text-blue-700 font-bold bg-blue-50 border border-blue-200 px-2 py-0.5 rounded flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-blue-500 animate-ping"></span>
-                    <span>自動保存中...</span>
-                  </span>
-                ) : syncStatus === 'syncing' ? (
-                  <span className="text-amber-600 font-bold bg-amber-50 px-2 py-0.5 rounded">● 同期接続中...</span>
-                ) : (
-                  <button 
-                    onClick={() => {
-                      setInputRoomId(roomId);
-                      setIsRoomModalOpen(true);
-                    }}
-                    className="text-slate-700 font-bold bg-slate-100 hover:bg-slate-200 border border-slate-300 px-2 py-0.5 rounded flex items-center gap-1 transition-colors"
-                  >
-                    <span>💾 端末に自動保存中 (合言葉: {roomId})</span>
-                  </button>
-                )}
+          <header className="bg-white border-b border-slate-200 px-4 py-2.5 sm:px-6 flex flex-wrap items-center justify-between gap-2.5 shrink-0 shadow-sm z-40 relative">
+            <div className="flex flex-wrap items-center gap-3">
+              <div>
+                <h1 className="text-base sm:text-lg font-extrabold text-slate-800 tracking-tight flex items-center gap-2">
+                  Parallel
+                  <span className="text-[10px] font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">v2.0</span>
+                </h1>
+                <div className="text-[11px] text-slate-500 mt-0.5 flex flex-wrap items-center gap-1.5">
+                  {syncStatus === 'synced' ? (
+                    <button
+                      onClick={() => {
+                        setInputRoomId(roomId);
+                        setIsRoomModalOpen(true);
+                      }}
+                      className="text-emerald-700 font-bold bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded flex items-center gap-1.5 transition-colors"
+                      title="クリックして合言葉（ルームID）を変更"
+                    >
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                      <span>同期中 ({roomId})</span>
+                    </button>
+                  ) : syncStatus === 'saving' ? (
+                    <span className="text-blue-700 font-bold bg-blue-50 border border-blue-200 px-2 py-0.5 rounded flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-blue-500 animate-ping"></span>
+                      <span>保存中...</span>
+                    </span>
+                  ) : syncStatus === 'syncing' ? (
+                    <span className="text-amber-600 font-bold bg-amber-50 px-2 py-0.5 rounded">● 接続中...</span>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        setInputRoomId(roomId);
+                        setIsRoomModalOpen(true);
+                      }}
+                      className="text-slate-700 font-bold bg-slate-100 hover:bg-slate-200 border border-slate-300 px-2 py-0.5 rounded flex items-center gap-1 transition-colors"
+                    >
+                      <span>💾 ローカル保存 ({roomId})</span>
+                    </button>
+                  )}
 
-                <button
-                  onClick={handleCopyShareLink}
-                  className="text-indigo-700 font-bold bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2 py-0.5 rounded flex items-center gap-1 transition-colors"
-                  title="他の人のスマホ・PCと同期するためのURLをコピー"
-                >
-                  <ShareLinkIcon />
-                  <span>共有URLをコピー</span>
-                </button>
+                  <button
+                    onClick={handleCopyShareLink}
+                    className="text-indigo-700 font-bold bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2 py-0.5 rounded flex items-center gap-1 transition-colors"
+                    title="共有URLをコピー"
+                  >
+                    <ShareLinkIcon />
+                    <span>共有URL</span>
+                  </button>
 
-                {lastSavedText && (
-                  <span className="text-[10px] text-slate-400 font-mono">
-                    最終保存: {lastSavedText}
-                  </span>
-                )}
+                  {lastSavedText && (
+                    <span className="text-[10px] text-slate-400 font-mono hidden md:inline">
+                      {lastSavedText}
+                    </span>
+                  )}
+                </div>
               </div>
+
+              {/* メインタブ切替 */}
+              <nav className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
+                <button
+                  onClick={() => setActiveMainTab('timeline')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                    activeMainTab === 'timeline'
+                      ? 'bg-white text-slate-900 shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <LayersIcon />
+                  <span>タイムライン</span>
+                </button>
+                <button
+                  onClick={() => setActiveMainTab('features')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                    activeMainTab === 'features'
+                      ? 'bg-white text-indigo-700 shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <TagIcon />
+                  <span>活用機能</span>
+                  <span className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.2 rounded-full">
+                    {registeredFeatures.length}
+                  </span>
+                </button>
+                <button
+                  onClick={() => setActiveMainTab('stocks')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                    activeMainTab === 'stocks'
+                      ? 'bg-white text-emerald-700 shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <BookmarkIcon />
+                  <span>ストック</span>
+                  <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.2 rounded-full">
+                    {situationStocks.length}
+                  </span>
+                </button>
+              </nav>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {/* Undo / Redo */}
+              <div className="flex items-center bg-slate-100 border border-slate-300 rounded-lg p-0.5">
+                <button
+                  onClick={handleUndo}
+                  disabled={pastHistory.length === 0}
+                  className="px-2 py-1 text-xs font-bold text-slate-700 hover:bg-white rounded transition-colors disabled:opacity-35 disabled:hover:bg-transparent"
+                  title="元に戻す (Ctrl+Z)"
+                >
+                  <UndoIcon />
+                </button>
+                <button
+                  onClick={handleRedo}
+                  disabled={futureHistory.length === 0}
+                  className="px-2 py-1 text-xs font-bold text-slate-700 hover:bg-white rounded transition-colors disabled:opacity-35 disabled:hover:bg-transparent"
+                  title="やり直す (Ctrl+Y)"
+                >
+                  <RedoIcon />
+                </button>
+              </div>
+
               <button
                 onClick={handleExportImage}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 shadow-sm transition-all"
-                title="フローチャート全体を最適化された高画質PNGとして出力"
+                className="flex items-center gap-1 px-2.5 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 shadow-sm transition-all"
+                title="現在のタイムラインをPNG画像として保存"
               >
                 <ImageIcon />
-                <span>画像保存</span>
+                <span className="hidden xl:inline">画像</span>
               </button>
 
               <button
                 onClick={handleExportCSV}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-lg text-xs font-bold text-emerald-800 shadow-sm transition-all"
-                title="Excel/スプレッドシート用ファイルとして出力"
+                className="flex items-center gap-1 px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-lg text-xs font-bold text-emerald-800 shadow-sm transition-all"
+                title="現在のタイムラインをCSV出力"
               >
                 <SheetIcon />
-                <span>スプレッドシート</span>
+                <span className="hidden xl:inline">CSV</span>
               </button>
 
               <button
                 onClick={handleExportJSON}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 shadow-sm transition-all"
-                title="PCやスマホにバックアップ保存"
+                className="flex items-center gap-1 px-2.5 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 shadow-sm transition-all"
+                title="全データをJSONバックアップ保存"
               >
                 <DownloadIcon />
-                <span>JSON保存</span>
+                <span className="hidden xl:inline">保存</span>
               </button>
 
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 shadow-sm transition-all"
-                title="保存したJSONファイルを読み込む"
+                className="flex items-center gap-1 px-2.5 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 shadow-sm transition-all"
+                title="JSONファイルを読み込む"
               >
                 <UploadIcon />
-                <span>開く</span>
-              </button>
-
-              <div className="flex items-center bg-slate-100 border border-slate-300 rounded-lg p-0.5">
-                <button
-                  onClick={handleZoomOut}
-                  className="px-2 py-1 text-xs font-bold text-slate-600 hover:bg-white rounded transition-colors"
-                  title="縮小"
-                >
-                  🔍-
-                </button>
-                <span className="px-2 text-xs font-mono font-bold text-slate-700">
-                  {Math.round(zoom * 100)}%
-                </span>
-                <button
-                  onClick={handleZoomIn}
-                  className="px-2 py-1 text-xs font-bold text-slate-600 hover:bg-white rounded transition-colors"
-                  title="拡大"
-                >
-                  🔍+
-                </button>
-              </div>
-
-              <div className="flex items-center gap-1 text-xs bg-slate-50 border border-slate-300 px-2 py-1 rounded-lg">
-                <span className="text-slate-500 font-semibold hidden sm:inline">表示範囲:</span>
-                <select
-                  value={timelineStartHour}
-                  onChange={(e) => {
-                    const newStart = Number(e.target.value);
-                    setTimelineStartHour(newStart);
-                    syncToCloudAndLocal(treeData, newStart, timelineEndHour);
-                  }}
-                  className="bg-transparent font-mono font-bold text-slate-700 focus:outline-none cursor-pointer"
-                >
-                  {Array.from({ length: 24 }).map((_, i) => (
-                    <option key={i} value={i} disabled={i >= timelineEndHour}>
-                      {String(i).padStart(2, '0')}:00
-                    </option>
-                  ))}
-                </select>
-                <span className="text-slate-400">〜</span>
-                <select
-                  value={timelineEndHour}
-                  onChange={(e) => {
-                    const newEnd = Number(e.target.value);
-                    setTimelineEndHour(newEnd);
-                    syncToCloudAndLocal(treeData, timelineStartHour, newEnd);
-                  }}
-                  className="bg-transparent font-mono font-bold text-slate-700 focus:outline-none cursor-pointer"
-                >
-                  {Array.from({ length: 25 }).map((_, i) => (
-                    <option key={i} value={i} disabled={i <= timelineStartHour}>
-                      {String(i).padStart(2, '0')}:00
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <button
-                onClick={() => {
-                  setTimelineStartHour(0);
-                  setTimelineEndHour(24);
-                  setTreeData(initialTreeData);
-                  syncToCloudAndLocal(initialTreeData, 0, 24);
-                  showToast('初期状態にリセットしました。');
-                }}
-                className="text-xs text-slate-500 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-md transition-colors font-medium"
-              >
-                初期化
+                <span className="hidden xl:inline">開く</span>
               </button>
 
               <button
                 onClick={openPasswordModal}
-                className="flex items-center gap-1 text-xs text-amber-700 hover:text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1 rounded-md transition-colors font-bold"
+                className="flex items-center gap-1 text-xs text-amber-700 hover:text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1.5 rounded-lg transition-colors font-bold"
                 title="閲覧用のID・パスワードを変更"
               >
                 <KeyIcon />
-                <span>PW変更</span>
               </button>
 
               <button
                 onClick={handleLogout}
-                className="flex items-center gap-1 text-xs text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2.5 py-1 rounded-md transition-colors font-bold"
+                className="flex items-center gap-1 text-xs text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2.5 py-1.5 rounded-lg transition-colors font-bold"
                 title="画面をロックしてログイン画面に戻る"
               >
                 <LogoutIcon />
-                <span className="hidden sm:inline">ロック</span>
               </button>
             </div>
           </header>
+
+          {/* タイムラインVer切替バー（タイムラインタブ表示時） */}
+          {activeMainTab === 'timeline' && (
+            <div className="bg-slate-50 border-b border-slate-200 px-4 py-1.5 sm:px-6 flex flex-wrap items-center justify-between gap-2 shrink-0 z-30">
+              <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 max-w-full">
+                <span className="text-[11px] font-bold text-slate-500 mr-1 shrink-0">タイムラインVer:</span>
+                {workspace.timelines.map(tl => {
+                  const isActive = tl.id === activeTimeline.id;
+                  return (
+                    <div
+                      key={tl.id}
+                      className={`flex items-center rounded-lg border text-xs transition-all shrink-0 ${
+                        isActive
+                          ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      <button
+                        onClick={() => handleSwitchTimeline(tl.id)}
+                        className="px-2.5 py-1 font-bold"
+                      >
+                        {tl.name}
+                      </button>
+                      {isActive && (
+                        <div className="flex items-center pr-1 gap-0.5 border-l border-slate-700 pl-1">
+                          <button
+                            onClick={() => openRenameVersionModal(tl)}
+                            className="p-0.5 hover:bg-slate-700 rounded text-slate-300 hover:text-white"
+                            title="バージョン名を変更"
+                          >
+                            <EditIcon />
+                          </button>
+                          {workspace.timelines.length > 1 && (
+                            <button
+                              onClick={() => openDeleteVersionModal(tl)}
+                              className="p-0.5 hover:bg-rose-600 rounded text-slate-300 hover:text-white"
+                              title="このバージョンを削除"
+                            >
+                              <TrashIcon />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                <button
+                  onClick={openCreateVersionModal}
+                  className="flex items-center gap-1 px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg text-xs font-bold shrink-0 transition-colors"
+                  title="新しいタイムラインVerを作成・複製"
+                >
+                  <PlusIcon />
+                  <span>新規Ver</span>
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <div className="flex items-center gap-1 text-xs bg-white border border-slate-300 px-2 py-1 rounded-lg">
+                  <span className="text-slate-500 font-semibold hidden sm:inline">表示範囲:</span>
+                  <select
+                    value={timelineStartHour}
+                    onChange={(e) => {
+                      const newStart = Number(e.target.value);
+                      dispatchWorkspaceUpdate(prev => ({
+                        ...prev,
+                        timelines: prev.timelines.map(t =>
+                          t.id === prev.activeTimelineId ? { ...t, timelineStartHour: newStart } : t
+                        )
+                      }), { recordHistory: false });
+                    }}
+                    className="bg-transparent font-mono font-bold text-slate-700 focus:outline-none cursor-pointer"
+                  >
+                    {Array.from({ length: 24 }).map((_, i) => (
+                      <option key={i} value={i} disabled={i >= timelineEndHour}>
+                        {String(i).padStart(2, '0')}:00
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-slate-400">〜</span>
+                  <select
+                    value={timelineEndHour}
+                    onChange={(e) => {
+                      const newEnd = Number(e.target.value);
+                      dispatchWorkspaceUpdate(prev => ({
+                        ...prev,
+                        timelines: prev.timelines.map(t =>
+                          t.id === prev.activeTimelineId ? { ...t, timelineEndHour: newEnd } : t
+                        )
+                      }), { recordHistory: false });
+                    }}
+                    className="bg-transparent font-mono font-bold text-slate-700 focus:outline-none cursor-pointer"
+                  >
+                    {Array.from({ length: 25 }).map((_, i) => (
+                      <option key={i} value={i} disabled={i <= timelineStartHour}>
+                        {String(i).padStart(2, '0')}:00
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  onClick={() => {
+                    dispatchWorkspaceUpdate(prev => ({
+                      ...prev,
+                      timelines: prev.timelines.map(t =>
+                        t.id === prev.activeTimelineId
+                          ? { ...t, treeData: initialTreeData, timelineStartHour: 0, timelineEndHour: 24 }
+                          : t
+                      )
+                    }));
+                    showToast('現在のタイムラインを初期状態にリセットしました。');
+                  }}
+                  className="text-xs text-slate-500 hover:text-slate-800 bg-white hover:bg-slate-200 border border-slate-300 px-2.5 py-1 rounded-lg transition-colors font-medium"
+                >
+                  初期化
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* 通知トースト */}
           {toastMessage && (
@@ -1756,304 +2425,778 @@
             </div>
           )}
 
-          {/* 固定タイムライン時間軸ルーラー */}
-          <div className="w-full h-10 bg-white/95 backdrop-blur-md border-b border-slate-200 shrink-0 overflow-hidden relative z-30 shadow-xs select-none">
-            <div
-              className="relative h-full"
-              style={{
-                width: `${canvasWidth * zoom}px`,
-                transform: `translateX(-${scrollLeft}px)`
-              }}
-            >
-              {Array.from({ length: totalHours + 1 }).map((_, idx) => {
-                const hour = timelineStartHour + idx;
-                const posX = (idx * PIXELS_PER_HOUR + 60) * zoom;
-                return (
-                  <div
-                    key={hour}
-                    className="absolute border-l border-slate-300 h-full flex items-center pl-1.5"
-                    style={{ left: `${posX}px` }}
-                  >
-                    <span className="text-xs font-mono font-bold text-slate-600">
-                      {String(hour).padStart(2, '0')}:00
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Main Canvas / Scrollable View */}
-          <div 
-            ref={mainScrollRef}
-            onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
-            className="flex-1 min-h-0 min-w-0 overflow-auto relative select-none"
-          >
-            <div
-              style={{
-                width: `${canvasWidth * zoom}px`,
-                height: `${layout.totalHeight * zoom}px`,
-                position: 'relative'
-              }}
-            >
-              <div 
-                className="relative origin-top-left transition-transform duration-75"
-                style={{ 
-                  width: `${canvasWidth}px`, 
-                  height: `${layout.totalHeight}px`,
-                  transform: `scale(${zoom})`,
-                  transformOrigin: '0 0'
-                }}
-              >
-                {/* 背景グリッド線 */}
-                <div className="absolute inset-0 pointer-events-none">
+          {/* ================================================================ */}
+          {/* タブ1: タイムライン表示                                          */}
+          {/* ================================================================ */}
+          {activeMainTab === 'timeline' && (
+            <>
+              {/* 固定タイムライン時間軸ルーラー */}
+              <div className="w-full h-10 bg-white/95 backdrop-blur-md border-b border-slate-200 shrink-0 overflow-hidden relative z-30 shadow-sm select-none">
+                <div
+                  className="relative h-full"
+                  style={{
+                    width: `${canvasWidth * zoom}px`,
+                    transform: `translateX(-${scrollLeft}px)`
+                  }}
+                >
                   {Array.from({ length: totalHours + 1 }).map((_, idx) => {
-                    const posX = idx * PIXELS_PER_HOUR + 60;
+                    const hour = timelineStartHour + idx;
+                    const posX = (idx * PIXELS_PER_HOUR + 60) * zoom;
                     return (
-                      <div 
-                        key={idx} 
-                        className="absolute top-0 bottom-0 border-l border-slate-200/60"
+                      <div
+                        key={hour}
+                        className="absolute border-l border-slate-300 h-full flex items-center pl-1.5"
                         style={{ left: `${posX}px` }}
-                      />
+                      >
+                        <span className="text-xs font-mono font-bold text-slate-600">
+                          {String(hour).padStart(2, '0')}:00
+                        </span>
+                      </div>
                     );
                   })}
                 </div>
+              </div>
 
-                {/* S字曲線（接続線）のSVGレイヤー */}
-                <svg className="absolute inset-0 w-full h-full pointer-events-none z-10">
-                  {layout.links.map(link => {
-                    const controlX1 = link.startX + Math.max(30, (link.endX - link.startX) / 2);
-                    const controlX2 = link.endX - Math.max(30, (link.endX - link.startX) / 2);
-                    const pathD = `M ${link.startX} ${link.startY} C ${controlX1} ${link.startY}, ${controlX2} ${link.endY}, ${link.endX} ${link.endY}`;
-
-                    return (
-                      <g key={link.id}>
-                        <path
-                          d={pathD}
-                          fill="none"
-                          stroke={getColorStroke(link.colorClass)}
-                          strokeWidth="4"
-                          strokeLinecap="round"
-                          className="transition-all duration-300"
+              {/* Main Canvas */}
+              <div
+                ref={mainScrollRef}
+                onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
+                onPointerDown={handleCanvasPointerDown}
+                onPointerMove={handleCanvasPointerMove}
+                onPointerUp={handleCanvasPointerUp}
+                onPointerLeave={handleCanvasPointerUp}
+                className={`flex-1 min-h-0 min-w-0 overflow-auto relative select-none ${
+                  panState ? 'cursor-grabbing' : 'cursor-grab'
+                }`}
+              >
+                <div
+                  style={{
+                    width: `${canvasWidth * zoom}px`,
+                    height: `${layout.totalHeight * zoom}px`,
+                    position: 'relative'
+                  }}
+                >
+                  <div
+                    className="relative origin-top-left transition-transform duration-75"
+                    style={{
+                      width: `${canvasWidth}px`,
+                      height: `${layout.totalHeight}px`,
+                      transform: `scale(${zoom})`,
+                      transformOrigin: '0 0'
+                    }}
+                  >
+                    {/* 背景グリッド線 */}
+                    <div className="absolute inset-0 pointer-events-none">
+                      {Array.from({ length: totalHours + 1 }).map((_, idx) => (
+                        <div
+                          key={idx}
+                          className="absolute top-0 bottom-0 border-l border-slate-200/60"
+                          style={{ left: `${idx * PIXELS_PER_HOUR + 60}px` }}
                         />
-                        <path
-                          d={pathD}
-                          fill="none"
-                          stroke="#ffffff"
-                          strokeWidth="1.5"
-                          strokeLinecap="round"
-                          strokeDasharray="4 4"
-                          className="opacity-60"
-                        />
-                      </g>
-                    );
-                  })}
-                </svg>
+                      ))}
+                    </div>
 
-                {/* 分岐カード（ノード）群 */}
-                {layout.nodes.map(node => {
-                  const currentFeatures = parseFeatures(node.features || node.feature);
-                  const isDragging = dragState?.id === node.id;
-                  const h = getNodeHeight(node);
+                    {/* 接続線SVG */}
+                    <svg className="absolute inset-0 w-full h-full pointer-events-none z-10">
+                      {layout.links.map(link => {
+                        const controlX1 = link.startX + Math.max(30, (link.endX - link.startX) / 2);
+                        const controlX2 = link.endX - Math.max(30, (link.endX - link.startX) / 2);
+                        const pathD = `M ${link.startX} ${link.startY} C ${controlX1} ${link.startY}, ${controlX2} ${link.endY}, ${link.endX} ${link.endY}`;
+                        return (
+                          <g key={link.id}>
+                            <path
+                              d={pathD}
+                              fill="none"
+                              stroke={getColorStroke(link.colorClass)}
+                              strokeWidth="4"
+                              strokeLinecap="round"
+                              className="transition-all duration-300"
+                            />
+                            <path
+                              d={pathD}
+                              fill="none"
+                              stroke="#ffffff"
+                              strokeWidth="1.5"
+                              strokeLinecap="round"
+                              strokeDasharray="4 4"
+                              className="opacity-60"
+                            />
+                          </g>
+                        );
+                      })}
+                    </svg>
 
-                  return (
-                    <div
-                      key={node.id}
-                      onPointerDown={(e) => handlePointerDown(e, node)}
-                      onPointerMove={handlePointerMove}
-                      onPointerUp={handlePointerUp}
-                      className={`absolute z-20 rounded-2xl border shadow-sm flex flex-col justify-between p-3.5 transition-shadow cursor-grab active:cursor-grabbing ${node.color || 'bg-white'} ${
-                        isDragging ? 'shadow-2xl ring-2 ring-blue-500 z-40' : 'hover:shadow-md hover:border-slate-300'
-                      }`}
-                      style={{
-                        left: `${node._x}px`,
-                        top: `${node._y - (h / 2)}px`,
-                        width: `${node._width}px`,
-                        height: `${h}px`,
-                        touchAction: 'none'
-                      }}
-                    >
-                      <div>
-                        <div className="flex items-start justify-between gap-1.5 pb-2 border-b border-slate-900/10">
-                          <div className="flex items-start gap-1.5 min-w-0 flex-1">
-                            <span className="text-slate-400 mt-0.5 shrink-0 cursor-grab">
-                              <DragIcon />
-                            </span>
-                            <div className="min-w-0 flex-1">
-                              <h3 className="font-extrabold text-slate-800 text-sm leading-snug break-words whitespace-normal">
-                                {node.title}
-                              </h3>
-                              <div className="mt-1">
-                                <span className="inline-block px-1.5 py-0.5 bg-slate-900/5 text-slate-700 rounded text-[10px] font-mono font-semibold">
-                                  {node.startTime || '09:00'} - {node.endTime || '09:30'}
+                    {/* 分岐カード群 */}
+                    {layout.nodes.map(item => {
+                      const { node, x, y, width, height, displayStartTime, displayEndTime } = item;
+                      const currentFeatures = parseFeatures(node.features || node.feature);
+                      const isDragging = dragState?.id === node.id;
+
+                      return (
+                        <div
+                          key={node.id}
+                          data-node-card="true"
+                          onPointerDown={(e) => handlePointerDown(e, node)}
+                          onPointerMove={handlePointerMove}
+                          onPointerUp={handlePointerUp}
+                          className={`absolute z-20 rounded-2xl border shadow-sm flex flex-col justify-between p-3.5 transition-shadow cursor-grab active:cursor-grabbing ${node.color || 'bg-white'} ${
+                            isDragging ? 'shadow-2xl ring-2 ring-blue-500 z-40' : 'hover:shadow-md hover:border-slate-300'
+                          }`}
+                          style={{
+                            left: `${x}px`,
+                            top: `${y - (height / 2)}px`,
+                            width: `${width}px`,
+                            minHeight: `${height}px`,
+                            touchAction: 'none'
+                          }}
+                        >
+                          <div>
+                            <div className="flex items-start justify-between gap-1.5 pb-2 border-b border-slate-900/10">
+                              <div className="flex items-start gap-1.5 min-w-0 flex-1">
+                                <span className="text-slate-400 mt-0.5 shrink-0 cursor-grab">
+                                  <DragIcon />
                                 </span>
+                                <div className="min-w-0 flex-1">
+                                  <h3 className="font-extrabold text-slate-800 text-sm leading-snug break-words whitespace-normal">
+                                    {node.title}
+                                  </h3>
+                                  <div className="mt-1">
+                                    <span className="inline-block px-1.5 py-0.5 bg-slate-900/5 text-slate-700 rounded text-[10px] font-mono font-semibold">
+                                      {displayStartTime} - {displayEndTime}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-0.5 shrink-0">
+                                <button
+                                  onClick={() => handleCopyNode(node)}
+                                  className="p-1 hover:bg-slate-900/10 rounded text-slate-600 transition-colors"
+                                  title="この分岐をコピー"
+                                >
+                                  <CopyIcon />
+                                </button>
+                                <button
+                                  onClick={() => handleEditClick(node)}
+                                  className="p-1 hover:bg-slate-900/10 rounded text-slate-600 transition-colors"
+                                  title="編集"
+                                >
+                                  <EditIcon />
+                                </button>
+                                {node.id !== 'root' && (
+                                  <button
+                                    onClick={() => handleDeleteClick(node.id)}
+                                    className="p-1 hover:bg-red-500/10 rounded text-red-600 transition-colors"
+                                    title="削除"
+                                  >
+                                    <TrashIcon />
+                                  </button>
+                                )}
                               </div>
                             </div>
+
+                            {node.id !== 'root' && (
+                              <div className="flex items-center justify-end gap-1 py-1 border-b border-slate-900/5 text-[10px] text-slate-600">
+                                <span className="text-[9px] text-slate-400 mr-auto">階層・並び順</span>
+                                <button onClick={() => handleReorderClick(node.id, -1)} className="p-0.5 hover:bg-slate-900/10 rounded" title="上に移動">
+                                  <ArrowUpIcon />
+                                </button>
+                                <button onClick={() => handleReorderClick(node.id, 1)} className="p-0.5 hover:bg-slate-900/10 rounded" title="下に移動">
+                                  <ArrowDownIcon />
+                                </button>
+                                <button onClick={() => handlePromoteClick(node.id)} className="p-0.5 hover:bg-slate-900/10 rounded" title="上の階層へ昇格">
+                                  <ArrowLeftIcon />
+                                </button>
+                                <button onClick={() => handleDemoteClick(node.id)} className="p-0.5 hover:bg-slate-900/10 rounded" title="下の階層へ降格">
+                                  <ArrowRightIcon />
+                                </button>
+                              </div>
+                            )}
+
+                            {node.description && (
+                              <p className="text-xs text-slate-600 my-2 leading-relaxed break-words whitespace-pre-wrap">
+                                {node.description}
+                              </p>
+                            )}
+
+                            {(node.aiWith || node.aiWithout) && (
+                              <div className="my-2 space-y-1.5 text-xs">
+                                {node.aiWith && (
+                                  <div className="bg-white/80 border border-emerald-500/20 rounded-lg p-2 text-slate-700">
+                                    <div className="font-bold text-emerald-700 text-[11px] mb-0.5">🟢 AIあり (〇〇さん)</div>
+                                    <p className="leading-snug break-words whitespace-pre-wrap text-[11px]">{node.aiWith}</p>
+                                  </div>
+                                )}
+                                {node.aiWithout && (
+                                  <div className="bg-white/80 border border-rose-500/20 rounded-lg p-2 text-slate-700">
+                                    <div className="font-bold text-rose-700 text-[11px] mb-0.5">🔴 AIなし (××さん)</div>
+                                    <p className="leading-snug break-words whitespace-pre-wrap text-[11px]">{node.aiWithout}</p>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {currentFeatures.length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-2">
+                                {currentFeatures.map((feat, i) => (
+                                  <span key={i} className="px-2 py-0.5 bg-indigo-50 border border-indigo-200/60 text-indigo-700 font-semibold text-[10px] rounded-md">
+                                    {feat}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
                           </div>
 
-                          <div className="flex items-center gap-0.5 shrink-0">
+                          <div className="mt-3 pt-2 border-t border-slate-900/10 flex flex-col gap-1">
                             <button
-                              onClick={() => handleCopyNode(node)}
-                              className="p-1 hover:bg-slate-900/10 rounded text-slate-600 transition-colors"
-                              title="この分岐をコピー"
+                              onClick={() => handleAddClick(node)}
+                              className="w-full py-1.5 px-3 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 flex items-center justify-center gap-1.5 shadow-sm transition-colors"
                             >
-                              <CopyIcon />
+                              <PlusIcon />
+                              <span>分岐を追加</span>
                             </button>
-                            <button
-                              onClick={() => handleEditClick(node)}
-                              className="p-1 hover:bg-slate-900/10 rounded text-slate-600 transition-colors"
-                              title="編集（リアルタイム自動保存）"
-                            >
-                              <EditIcon />
-                            </button>
-                            {node.id !== 'root' && (
+
+                            {copiedNode && (
                               <button
-                                onClick={() => handleDeleteClick(node.id)}
-                                className="p-1 hover:bg-red-500/10 rounded text-red-600 transition-colors"
-                                title="削除"
+                                onClick={() => handlePasteNode(node)}
+                                className="w-full py-1 px-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-lg text-[11px] font-bold text-emerald-800 flex items-center justify-center gap-1 transition-colors"
                               >
-                                <TrashIcon />
+                                <CopyIcon />
+                                <span>コピーをここに貼り付け</span>
                               </button>
                             )}
                           </div>
                         </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
 
-                        {node.id !== 'root' && (
-                          <div className="flex items-center justify-end gap-1 py-1 border-b border-slate-900/5 text-[10px] text-slate-600">
-                            <span className="text-[9px] text-slate-400 mr-auto">階層・並び順</span>
-                            <button
-                              onClick={() => handleReorderClick(node.id, -1)}
-                              className="p-0.5 hover:bg-slate-900/10 rounded"
-                              title="上に移動"
-                            >
-                              <ArrowUpIcon />
-                            </button>
-                            <button
-                              onClick={() => handleReorderClick(node.id, 1)}
-                              className="p-0.5 hover:bg-slate-900/10 rounded"
-                              title="下に移動"
-                            >
-                              <ArrowDownIcon />
-                            </button>
-                            <button
-                              onClick={() => handlePromoteClick(node.id)}
-                              className="p-0.5 hover:bg-slate-900/10 rounded"
-                              title="上の階層へ昇格"
-                            >
-                              <ArrowLeftIcon />
-                            </button>
-                            <button
-                              onClick={() => handleDemoteClick(node.id)}
-                              className="p-0.5 hover:bg-slate-900/10 rounded"
-                              title="下の階層へ降格"
-                            >
-                              <ArrowRightIcon />
-                            </button>
-                          </div>
-                        )}
+              {/* 右下フローティング操作バー */}
+              <div className="fixed bottom-4 right-6 z-50 flex items-center gap-2 bg-slate-900/90 text-white backdrop-blur-md px-3 py-2 rounded-full shadow-2xl border border-slate-700">
+                <button onClick={handleZoomOut} className="p-1 hover:bg-slate-700 rounded text-xs font-bold" title="縮小">-</button>
+                <span className="text-xs font-mono font-bold px-1">{Math.round(zoom * 100)}%</span>
+                <button onClick={handleZoomIn} className="p-1 hover:bg-slate-700 rounded text-xs font-bold" title="拡大">+</button>
+                <div className="w-px h-4 bg-slate-700 mx-1"></div>
+                <button onClick={() => scrollHorizontal(-400)} className="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded-md text-xs font-bold">◀ 左</button>
+                <button onClick={() => scrollHorizontal(400)} className="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded-md text-xs font-bold">右 ▶</button>
+              </div>
+            </>
+          )}
 
-                        {node.description && (
-                          <p className="text-xs text-slate-600 my-2 leading-relaxed break-words whitespace-normal">
-                            {node.description}
-                          </p>
-                        )}
+          {/* ================================================================ */}
+          {/* タブ2: 活用機能マスター登録タブ                                  */}
+          {/* ================================================================ */}
+          {activeMainTab === 'features' && (
+            <div className="flex-1 overflow-y-auto p-4 sm:p-8 select-text">
+              <div className="max-w-3xl mx-auto space-y-6">
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+                  <h2 className="text-base font-extrabold text-slate-800 flex items-center gap-2 mb-1">
+                    <TagIcon />
+                    <span>活用機能の登録（マスター管理）</span>
+                  </h2>
+                  <p className="text-xs text-slate-500 mb-4">
+                    ここで登録した機能は、すべてのタイムラインVerの分岐編集画面やシチュエーションストック作成画面で選択できるようになります。
+                  </p>
 
-                        {(node.aiWith || node.aiWithout) && (
-                          <div className="my-2 space-y-1.5 text-xs">
-                            {node.aiWith && (
-                              <div className="bg-white/80 border border-emerald-500/20 rounded-lg p-2 text-slate-700">
-                                <div className="font-bold text-emerald-700 text-[11px] mb-0.5 flex items-center gap-1">
-                                  <span>🟢 AIあり (〇〇さん)</span>
-                                </div>
-                                <p className="leading-snug break-words whitespace-normal text-[11px]">{node.aiWith}</p>
-                              </div>
-                            )}
-                            {node.aiWithout && (
-                              <div className="bg-white/80 border border-rose-500/20 rounded-lg p-2 text-slate-700">
-                                <div className="font-bold text-rose-700 text-[11px] mb-0.5 flex items-center gap-1">
-                                  <span>🔴 AIなし (××さん)</span>
-                                </div>
-                                <p className="leading-snug break-words whitespace-normal text-[11px]">{node.aiWithout}</p>
-                              </div>
-                            )}
-                          </div>
-                        )}
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      handleAddMasterFeatures(masterFeatureInput);
+                    }}
+                    className="flex gap-2"
+                  >
+                    <input
+                      type="text"
+                      value={masterFeatureInput}
+                      onChange={(e) => setMasterFeatureInput(e.target.value)}
+                      placeholder="例: かこって検索, 編集マジック, リアルタイム翻訳（カンマ区切りで複数一括登録可）"
+                      className="flex-1 px-3.5 py-2 border border-slate-300 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                    <button
+                      type="submit"
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-sm transition-colors flex items-center gap-1.5 shrink-0"
+                    >
+                      <PlusIcon />
+                      <span>登録する</span>
+                    </button>
+                  </form>
+                </div>
 
-                        {currentFeatures.length > 0 && (
-                          <div className="flex flex-wrap gap-1 mt-2">
-                            {currentFeatures.map((feat, i) => (
-                              <span 
-                                key={i} 
-                                className="px-2 py-0.5 bg-indigo-50 border border-indigo-200/60 text-indigo-700 font-semibold text-[10px] rounded-md"
-                              >
-                                {feat}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </div>
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-sm font-bold text-slate-800">
+                      登録済みの活用機能（{registeredFeatures.length}件）
+                    </h3>
+                    <span className="text-[11px] text-slate-400">名前変更・削除は全タイムラインへ反映されます</span>
+                  </div>
 
-                      <div className="mt-3 pt-2 border-t border-slate-900/10 flex flex-col gap-1">
-                        <button
-                          onClick={() => handleAddClick(node)}
-                          className="w-full py-1.5 px-3 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 flex items-center justify-center gap-1.5 shadow-xs transition-colors"
-                        >
-                          <PlusIcon />
-                          <span>分岐を追加</span>
-                        </button>
-
-                        {copiedNode && (
-                          <button
-                            onClick={() => handlePasteNode(node)}
-                            className="w-full py-1 px-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-lg text-[11px] font-bold text-emerald-800 flex items-center justify-center gap-1 transition-colors"
+                  {registeredFeatures.length === 0 ? (
+                    <p className="text-xs text-slate-400 text-center py-8">
+                      まだ活用機能が登録されていません。上のフォームから追加してください。
+                    </p>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      {registeredFeatures.map(feat => {
+                        const isEditing = editingMasterFeat === feat;
+                        return (
+                          <div
+                            key={feat}
+                            className="flex items-center justify-between gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
                           >
-                            <CopyIcon />
-                            <span>コピーをここに貼り付け</span>
-                          </button>
-                        )}
-                      </div>
+                            {isEditing ? (
+                              <div className="flex items-center gap-1.5 flex-1">
+                                <input
+                                  type="text"
+                                  value={editingMasterFeatVal}
+                                  onChange={(e) => setEditingMasterFeatVal(e.target.value)}
+                                  className="flex-1 px-2.5 py-1 border border-indigo-400 rounded-lg text-xs bg-white focus:outline-none"
+                                  autoFocus
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleRenameMasterFeature(feat, editingMasterFeatVal)}
+                                  className="px-2.5 py-1 bg-indigo-600 text-white text-xs font-bold rounded-lg"
+                                >
+                                  保存
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingMasterFeat(null)}
+                                  className="px-2 py-1 bg-slate-200 text-slate-600 text-xs font-bold rounded-lg"
+                                >
+                                  取消
+                                </button>
+                              </div>
+                            ) : (
+                              <>
+                                <span className="text-xs font-bold text-indigo-800 bg-indigo-50 border border-indigo-200/70 px-2.5 py-1 rounded-lg truncate">
+                                  {feat}
+                                </span>
+                                <div className="flex items-center gap-1 shrink-0">
+                                  <button
+                                    onClick={() => {
+                                      setEditingMasterFeat(feat);
+                                      setEditingMasterFeatVal(feat);
+                                    }}
+                                    className="p-1.5 hover:bg-slate-200 rounded-lg text-slate-600 transition-colors"
+                                    title="機能名を変更"
+                                  >
+                                    <EditIcon />
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteMasterFeature(feat)}
+                                    className="p-1.5 hover:bg-rose-100 rounded-lg text-rose-600 transition-colors"
+                                    title="削除"
+                                  >
+                                    <TrashIcon />
+                                  </button>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
-                  );
-                })}
+                  )}
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
-          {/* 右下フローティング操作バー */}
-          <div className="fixed bottom-4 right-6 z-50 flex items-center gap-2 bg-slate-900/90 text-white backdrop-blur-md px-3 py-2 rounded-full shadow-2xl border border-slate-700">
-            <button
-              onClick={handleZoomOut}
-              className="p-1 hover:bg-slate-700 rounded text-xs font-bold"
-              title="縮小"
-            >
-              -
-            </button>
-            <span className="text-xs font-mono font-bold px-1">{Math.round(zoom * 100)}%</span>
-            <button
-              onClick={handleZoomIn}
-              className="p-1 hover:bg-slate-700 rounded text-xs font-bold"
-              title="拡大"
-            >
-              +
-            </button>
-            <div className="w-px h-4 bg-slate-700 mx-1"></div>
-            <button
-              onClick={() => scrollHorizontal(-400)}
-              className="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded-md text-xs font-bold transition-colors flex items-center gap-1"
-            >
-              ◀ 左
-            </button>
-            <button
-              onClick={() => scrollHorizontal(400)}
-              className="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded-md text-xs font-bold transition-colors flex items-center gap-1"
-            >
-              右 ▶
-            </button>
-          </div>
+          {/* ================================================================ */}
+          {/* タブ3: シチュエーションストックタブ                              */}
+          {/* ================================================================ */}
+          {activeMainTab === 'stocks' && (
+            <div className="flex-1 overflow-y-auto p-4 sm:p-8 select-text">
+              <div className="max-w-5xl mx-auto space-y-5">
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-base font-extrabold text-slate-800 flex items-center gap-2">
+                      <BookmarkIcon />
+                      <span>シチュエーションストック</span>
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      よく使う場面やアイデアをストックしておき、現在のタイムライン（<strong className="text-slate-700">{activeTimeline.name}</strong>）の任意の分岐配下へすぐ追加できます。
+                    </p>
+                  </div>
+                  <button
+                    onClick={openCreateStockModal}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-sm transition-colors flex items-center gap-1.5"
+                  >
+                    <PlusIcon />
+                    <span>新しいストックを作成</span>
+                  </button>
+                </div>
 
-          {/* 編集 / 削除モーダル */}
+                {situationStocks.length === 0 ? (
+                  <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-12 text-center">
+                    <p className="text-sm font-bold text-slate-500 mb-1">ストックがまだありません</p>
+                    <p className="text-xs text-slate-400 mb-4">よく使うシチュエーションを登録しておくと、タイムライン作成がスムーズになります。</p>
+                    <button
+                      onClick={openCreateStockModal}
+                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl"
+                    >
+                      最初のストックを作成
+                    </button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {situationStocks.map(stock => {
+                      const feats = parseFeatures(stock.features);
+                      const selectedParent = stockInsertTarget[stock.id] || flatActiveNodes[0]?.id || 'root';
+                      return (
+                        <div
+                          key={stock.id}
+                          className={`rounded-2xl border border-slate-200 shadow-sm p-4 flex flex-col justify-between ${stock.color || 'bg-white'}`}
+                        >
+                          <div>
+                            <div className="flex items-start justify-between gap-2 pb-2 border-b border-slate-900/10">
+                              <div>
+                                <h3 className="font-extrabold text-slate-800 text-sm">{stock.title}</h3>
+                                <span className="inline-block mt-1 px-1.5 py-0.5 bg-slate-900/5 text-slate-600 rounded text-[10px] font-mono font-semibold">
+                                  目安: {stock.durationMin || 30}分
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-0.5 shrink-0">
+                                <button
+                                  onClick={() => openEditStockModal(stock)}
+                                  className="p-1 hover:bg-slate-900/10 rounded text-slate-600"
+                                  title="編集"
+                                >
+                                  <EditIcon />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteStock(stock.id)}
+                                  className="p-1 hover:bg-rose-500/10 rounded text-rose-600"
+                                  title="削除"
+                                >
+                                  <TrashIcon />
+                                </button>
+                              </div>
+                            </div>
+
+                            {stock.description && (
+                              <p className="text-xs text-slate-600 my-2 whitespace-pre-wrap leading-relaxed">
+                                {stock.description}
+                              </p>
+                            )}
+
+                            {(stock.aiWith || stock.aiWithout) && (
+                              <div className="my-2 space-y-1.5">
+                                {stock.aiWith && (
+                                  <div className="bg-white/80 border border-emerald-500/20 rounded-lg p-2">
+                                    <div className="font-bold text-emerald-700 text-[10px] mb-0.5">🟢 AIあり</div>
+                                    <p className="text-[11px] text-slate-700 whitespace-pre-wrap">{stock.aiWith}</p>
+                                  </div>
+                                )}
+                                {stock.aiWithout && (
+                                  <div className="bg-white/80 border border-rose-500/20 rounded-lg p-2">
+                                    <div className="font-bold text-rose-700 text-[10px] mb-0.5">🔴 AIなし</div>
+                                    <p className="text-[11px] text-slate-700 whitespace-pre-wrap">{stock.aiWithout}</p>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {feats.length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-2">
+                                {feats.map((f, i) => (
+                                  <span key={i} className="px-2 py-0.5 bg-indigo-50 border border-indigo-200/60 text-indigo-700 font-semibold text-[10px] rounded-md">
+                                    {f}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="mt-4 pt-3 border-t border-slate-900/10 space-y-2">
+                            <div>
+                              <label className="block text-[10px] font-bold text-slate-500 mb-1">
+                                追加先の親分岐（{activeTimeline.name}）
+                              </label>
+                              <select
+                                value={selectedParent}
+                                onChange={(e) => setStockInsertTarget(prev => ({ ...prev, [stock.id]: e.target.value }))}
+                                className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                              >
+                                {flatActiveNodes.map(n => (
+                                  <option key={n.id} value={n.id}>
+                                    {' '.repeat(n.depth)}{n.depth > 0 ? '└ ' : ''}{n.title}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <button
+                              onClick={() => handleInsertStockToTimeline(stock)}
+                              className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm transition-colors"
+                            >
+                              <PlusIcon />
+                              <span>この分岐の配下に追加する</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ================================================================ */}
+          {/* モーダル群                                                       */}
+          {/* ================================================================ */}
+
+          {/* 1. タイムラインVer作成 / 名前変更 / 削除モーダル */}
+          {versionModal.isOpen && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4 select-text">
+              <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+                {versionModal.mode === 'delete' ? (
+                  <div>
+                    <h2 className="text-base font-bold text-slate-800 mb-2">タイムラインVerの削除</h2>
+                    <p className="text-xs text-slate-600 mb-5">
+                      「<strong>{versionModal.name}</strong>」を削除します。このバージョン内の分岐データはすべて失われます。よろしいですか？
+                    </p>
+                    <div className="flex justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setVersionModal({ ...versionModal, isOpen: false })}
+                        className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg"
+                      >
+                        キャンセル
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleConfirmVersionModal}
+                        className="px-4 py-2 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-lg"
+                      >
+                        削除する
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <form onSubmit={handleConfirmVersionModal} className="space-y-4">
+                    <h2 className="text-base font-bold text-slate-800">
+                      {versionModal.mode === 'create' ? '新しいタイムラインVerを作成' : 'バージョン名の変更'}
+                    </h2>
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">バージョン名</label>
+                      <input
+                        type="text"
+                        value={versionModal.name}
+                        onChange={(e) => setVersionModal({ ...versionModal, name: e.target.value })}
+                        placeholder="例: Ver 2.0 (短縮版)"
+                        required
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+
+                    {versionModal.mode === 'create' && (
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1.5">初期データの作成方法</label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setVersionModal({ ...versionModal, baseMode: 'clone' })}
+                            className={`p-2.5 rounded-xl border text-left text-xs transition-all ${
+                              versionModal.baseMode === 'clone'
+                                ? 'border-blue-600 bg-blue-50 text-blue-900 font-bold'
+                                : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                            }`}
+                          >
+                            <div>現在のVerを複製</div>
+                            <div className="text-[10px] font-normal opacity-75 mt-0.5">今の内容をベースに派生作成</div>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setVersionModal({ ...versionModal, baseMode: 'blank' })}
+                            className={`p-2.5 rounded-xl border text-left text-xs transition-all ${
+                              versionModal.baseMode === 'blank'
+                                ? 'border-blue-600 bg-blue-50 text-blue-900 font-bold'
+                                : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                            }`}
+                          >
+                            <div>白紙から作成</div>
+                            <div className="text-[10px] font-normal opacity-75 mt-0.5">ルート1つだけの状態で開始</div>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex justify-end gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setVersionModal({ ...versionModal, isOpen: false })}
+                        className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg"
+                      >
+                        キャンセル
+                      </button>
+                      <button
+                        type="submit"
+                        className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg"
+                      >
+                        {versionModal.mode === 'create' ? '作成する' : '保存する'}
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* 2. シチュエーションストック作成 / 編集モーダル */}
+          {stockModal.isOpen && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4 select-text">
+              <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6">
+                <form onSubmit={handleSaveStock} className="space-y-4">
+                  <div className="flex justify-between items-center pb-3 border-b border-slate-100">
+                    <h2 className="text-base font-bold text-slate-800">
+                      {stockModal.editId ? 'ストックの編集' : '新しいシチュエーションストック'}
+                    </h2>
+                    <button
+                      type="button"
+                      onClick={() => setStockModal({ isOpen: false, editId: null })}
+                      className="text-slate-400 hover:text-slate-600 text-lg leading-none"
+                    >
+                      &times;
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="col-span-2">
+                      <label className="block text-xs font-bold text-slate-700 mb-1">タイトル</label>
+                      <input
+                        type="text"
+                        value={stockForm.title}
+                        onChange={(e) => setStockForm({ ...stockForm, title: e.target.value })}
+                        placeholder="例: 会議の議事録まとめ"
+                        required
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">目安時間(分)</label>
+                      <input
+                        type="number"
+                        min="15"
+                        step="15"
+                        value={stockForm.durationMin}
+                        onChange={(e) => setStockForm({ ...stockForm, durationMin: e.target.value })}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">概要・シチュエーション説明</label>
+                    <textarea
+                      rows={2}
+                      value={stockForm.description}
+                      onChange={(e) => setStockForm({ ...stockForm, description: e.target.value })}
+                      placeholder="前提条件や状況を入力"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+
+                  <div className="space-y-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                    <div>
+                      <label className="block text-xs font-bold text-emerald-700 mb-1">🟢 AIがある場合の文章 (〇〇さん)</label>
+                      <textarea
+                        rows={2}
+                        value={stockForm.aiWith}
+                        onChange={(e) => setStockForm({ ...stockForm, aiWith: e.target.value })}
+                        className="w-full px-3 py-2 border border-emerald-300 rounded-lg text-xs bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-rose-700 mb-1">🔴 AIがない場合の文章 (××さん)</label>
+                      <textarea
+                        rows={2}
+                        value={stockForm.aiWithout}
+                        onChange={(e) => setStockForm({ ...stockForm, aiWithout: e.target.value })}
+                        className="w-full px-3 py-2 border border-rose-300 rounded-lg text-xs bg-white focus:outline-none focus:ring-2 focus:ring-rose-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1.5">活用機能（登録済みから選択）</label>
+                    <div className="flex flex-wrap gap-1.5 bg-slate-50 border border-slate-200 p-2.5 rounded-lg max-h-32 overflow-y-auto">
+                      {registeredFeatures.length === 0 ? (
+                        <span className="text-[11px] text-slate-400">活用機能タブから機能を登録してください</span>
+                      ) : (
+                        registeredFeatures.map(feat => {
+                          const isSelected = stockForm.features.includes(feat);
+                          return (
+                            <button
+                              key={feat}
+                              type="button"
+                              onClick={() => {
+                                const next = isSelected
+                                  ? stockForm.features.filter(f => f !== feat)
+                                  : [...stockForm.features, feat];
+                                setStockForm({ ...stockForm, features: next });
+                              }}
+                              className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-colors ${
+                                isSelected
+                                  ? 'bg-indigo-600 text-white border-indigo-600'
+                                  : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                              }`}
+                            >
+                              {isSelected ? '✓ ' : '+ '}{feat}
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">カードテーマカラー</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {colorOptions.map(opt => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => setStockForm({ ...stockForm, color: opt.value })}
+                          className={`py-1.5 px-2 rounded-lg text-xs font-bold border transition-all ${opt.value} ${
+                            stockForm.color === opt.value
+                              ? 'border-blue-600 ring-2 ring-blue-500/20 text-blue-900'
+                              : 'border-slate-200 text-slate-700'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => setStockModal({ isOpen: false, editId: null })}
+                      className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg"
+                    >
+                      キャンセル
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-sm"
+                    >
+                      保存する
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* 3. 分岐の編集 / 削除モーダル */}
           {modalState.isOpen && (
-            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4 select-text">
               <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6">
                 {modalState.type === 'delete' ? (
                   <div>
@@ -2062,18 +3205,10 @@
                       この分岐および配下に連なるすべてのサブ分岐が削除されます。よろしいですか？
                     </p>
                     <div className="flex justify-end gap-2">
-                      <button
-                        type="button"
-                        onClick={closeModal}
-                        className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
-                      >
+                      <button type="button" onClick={closeModal} className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg">
                         キャンセル
                       </button>
-                      <button
-                        type="button"
-                        onClick={handleConfirmDelete}
-                        className="px-4 py-2 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
-                      >
+                      <button type="button" onClick={handleConfirmDelete} className="px-4 py-2 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg">
                         削除する
                       </button>
                     </div>
@@ -2087,11 +3222,7 @@
                           ✓ 入力内容はリアルタイムに自動保存・同期されます
                         </span>
                       </div>
-                      <button 
-                        type="button" 
-                        onClick={closeModal}
-                        className="text-slate-400 hover:text-slate-600 text-lg leading-none"
-                      >
+                      <button type="button" onClick={closeModal} className="text-slate-400 hover:text-slate-600 text-lg leading-none">
                         &times;
                       </button>
                     </div>
@@ -2111,20 +3242,18 @@
                       <div>
                         <label className="block text-xs font-bold text-slate-700 mb-1">開始時間</label>
                         <input
-                          type="text"
+                          type="time"
                           value={formData.startTime}
                           onChange={(e) => updateFormAndAutoSave({ startTime: e.target.value })}
-                          placeholder="09:00"
                           className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
                       </div>
                       <div>
                         <label className="block text-xs font-bold text-slate-700 mb-1">終了時間</label>
                         <input
-                          type="text"
+                          type="time"
                           value={formData.endTime}
                           onChange={(e) => updateFormAndAutoSave({ endTime: e.target.value })}
-                          placeholder="09:30"
                           className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
                       </div>
@@ -2143,9 +3272,7 @@
 
                     <div className="space-y-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
                       <div>
-                        <label className="block text-xs font-bold text-emerald-700 mb-1 flex items-center gap-1">
-                          <span>🟢 AIがある場合の文章 (〇〇さん)</span>
-                        </label>
+                        <label className="block text-xs font-bold text-emerald-700 mb-1">🟢 AIがある場合の文章 (〇〇さん)</label>
                         <textarea
                           rows={2}
                           value={formData.aiWith}
@@ -2156,9 +3283,7 @@
                       </div>
 
                       <div>
-                        <label className="block text-xs font-bold text-rose-700 mb-1 flex items-center gap-1">
-                          <span>🔴 AIがない場合の文章 (××さん)</span>
-                        </label>
+                        <label className="block text-xs font-bold text-rose-700 mb-1">🔴 AIがない場合の文章 (××さん)</label>
                         <textarea
                           rows={2}
                           value={formData.aiWithout}
@@ -2177,7 +3302,7 @@
                             type="button"
                             onClick={() => setFeatureTab('registered')}
                             className={`px-2 py-0.5 rounded font-bold transition-colors ${
-                              featureTab === 'registered' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-500'
+                              featureTab === 'registered' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'
                             }`}
                           >
                             登録済みから選択
@@ -2186,7 +3311,7 @@
                             type="button"
                             onClick={() => setFeatureTab('new')}
                             className={`px-2 py-0.5 rounded font-bold transition-colors ${
-                              featureTab === 'new' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-500'
+                              featureTab === 'new' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'
                             }`}
                           >
                             ＋ 新規入力
@@ -2198,7 +3323,7 @@
                         <div className="bg-slate-50 border border-slate-200 p-2.5 rounded-lg max-h-36 overflow-y-auto space-y-1">
                           {registeredFeatures.length === 0 ? (
                             <p className="text-[11px] text-slate-400 text-center py-2">
-                              登録済みの機能はありません。「新規入力」タブから追加してください。
+                              登録済みの機能はありません。「活用機能」タブまたは「新規入力」から追加してください。
                             </p>
                           ) : (
                             registeredFeatures.map((feat) => {
@@ -2220,7 +3345,7 @@
                                         onClick={() => {
                                           if (newFeatureNameInput.trim()) {
                                             const trimmed = newFeatureNameInput.trim();
-                                            dispatchTreeUpdate(prev => renameFeatureInTree(prev, feat, trimmed));
+                                            handleRenameMasterFeature(feat, trimmed);
                                             updateFormAndAutoSave({
                                               features: formData.features.map(f => f === feat ? trimmed : f)
                                             });
@@ -2266,7 +3391,7 @@
                                         <button
                                           type="button"
                                           onClick={() => {
-                                            dispatchTreeUpdate(prev => deleteFeatureFromTree(prev, feat));
+                                            handleDeleteMasterFeature(feat);
                                             updateFormAndAutoSave({
                                               features: formData.features.filter(f => f !== feat)
                                             });
@@ -2356,7 +3481,7 @@
                       <button
                         type="button"
                         onClick={closeModal}
-                        className="px-5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors"
+                        className="px-5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-colors"
                       >
                         完了（閉じる）
                       </button>
@@ -2367,9 +3492,9 @@
             </div>
           )}
 
-          {/* ID・パスワード変更モーダル */}
+          {/* 4. ID・パスワード変更モーダル */}
           {isPasswordModalOpen && (
-            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 select-text">
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 select-text">
               <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
                 <div className="flex justify-between items-center pb-3 border-b border-slate-100 mb-4">
                   <div className="flex items-center gap-2">
@@ -2493,9 +3618,9 @@
             </div>
           )}
 
-          {/* 共有ルーム設定モーダル */}
+          {/* 5. 共有ルーム設定モーダル */}
           {isRoomModalOpen && (
-            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 select-text">
               <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
                 <h2 className="text-lg font-bold text-slate-800 mb-1">複数人同期用の「合言葉（ルームID）」</h2>
                 <p className="text-xs text-slate-500 mb-4">
