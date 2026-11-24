@@ -834,6 +834,19 @@
 
       assignCoords(tree, TOP_MARGIN, 60);
 
+      // 一番上のカードの上端が余白（TOP_MARGIN）より上に飛び出さないよう全体を下に補正
+      const minTop = Math.min(...nodes.map(item => item.y - item.height / 2));
+      if (minTop < TOP_MARGIN) {
+        const shiftY = TOP_MARGIN - minTop;
+        nodes.forEach(item => {
+          item.y += shiftY;
+        });
+        links.forEach(link => {
+          link.startY += shiftY;
+          link.endY += shiftY;
+        });
+      }
+
       const maxY = Math.max(...nodes.map(item => item.y + item.height / 2), 850);
       return { nodes, links, totalHeight: maxY + GAP_Y };
     };
