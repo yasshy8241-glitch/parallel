@@ -940,7 +940,7 @@
     }
 
     // === PART 1 END (この直下にパート2を貼り付けてください) ===
-    function ParallelApp() {
+function ParallelApp() {
       const [isAuthenticated, setIsAuthenticated] = useState(() => {
         if (typeof window !== 'undefined') {
           return sessionStorage.getItem(AUTH_SESSION_KEY) === 'true';
@@ -1007,11 +1007,13 @@
       // ストックからタイムラインへ追加する際の親ノード選択
       const [stockInsertTarget, setStockInsertTarget] = useState({});
 
-      // ノード編集・削除モーダル
+      // ノード追加・編集・削除モーダル
       const [featureTab, setFeatureTab] = useState('registered');
       const [editingFeatureName, setEditingFeatureName] = useState(null);
       const [newFeatureNameInput, setNewFeatureNameInput] = useState('');
-      const [modalState, setModalState] = useState({ isOpen: false, type: '', targetNodeId: null });
+      const [addModalTab, setAddModalTab] = useState('new'); // 'new' | 'stock'
+      const [formError, setFormError] = useState('');
+      const [modalState, setModalState] = useState({ isOpen: false, type: '', targetNodeId: null, parentNodeId: null });
       const [formData, setFormData] = useState({
         title: '',
         description: '',
@@ -1905,6 +1907,9 @@
       };
 
       const updateFormAndAutoSave = (updatedFields) => {
+        if ('title' in updatedFields && updatedFields.title.trim()) {
+          setFormError('');
+        }
         setFormData(prevForm => {
           const nextForm = { ...prevForm, ...updatedFields };
 
@@ -1918,6 +1923,7 @@
             if (eMin <= sMin) nextForm.startTime = minutesToTime(Math.max(0, eMin - 15));
           }
 
+          // 編集モード時のみリアルタイム自動保存（新規追加時は確定時にバリデーションして保存）
           if (modalState.isOpen && modalState.type === 'edit' && modalState.targetNodeId) {
             const shouldRecord = !modalHistoryRecordedRef.current;
             modalHistoryRecordedRef.current = true;
@@ -1927,7 +1933,7 @@
                 return {
                   ...tl,
                   treeData: updateNodeInTree(tl.treeData, modalState.targetNodeId, {
-                    title: nextForm.title || '無題の分岐',
+                    title: nextForm.title,
                     description: nextForm.description,
                     features: nextForm.features,
                     aiWith: nextForm.aiWith,
@@ -1947,45 +1953,85 @@
       };
 
       const handleAddClick = (parentNode) => {
-        const newId = generateId('node');
         const defaultStart = parentNode.endTime || '09:30';
         const defaultEnd = minutesToTime(timeToMinutes(defaultStart) + 30);
-        const newNode = {
-          id: newId,
-          title: '新しい分岐',
-          description: '',
-          features: [],
-          aiWith: '',
-          aiWithout: '',
-          color: parentNode.color || 'bg-white',
-          startTime: defaultStart,
-          endTime: defaultEnd,
-          children: []
-        };
-
-        dispatchTreeUpdate(prev => addNodeToTree(prev, parentNode.id, newNode));
-        modalHistoryRecordedRef.current = true;
-
         setFormData({
-          title: newNode.title,
+          title: '',
           description: '',
           features: [],
           newFeatureText: '',
           aiWith: '',
           aiWithout: '',
-          color: newNode.color,
+          color: parentNode.color || 'bg-white',
           startTime: defaultStart,
           endTime: defaultEnd
         });
+        setFormError('');
         setFeatureTab('registered');
-        setModalState({ isOpen: true, type: 'edit', targetNodeId: newId });
+        setAddModalTab('new');
+        setModalState({ isOpen: true, type: 'add', targetNodeId: null, parentNodeId: parentNode.id });
+      };
+
+      const handleConfirmAdd = () => {
+        const trimmedTitle = formData.title.trim();
+        if (!trimmedTitle) {
+          setFormError('タイトルを入力してください。');
+          return;
+        }
+        const newNode = {
+          id: generateId('node'),
+          title: trimmedTitle,
+          description: formData.description,
+          features: formData.features,
+          aiWith: formData.aiWith,
+          aiWithout: formData.aiWithout,
+          color: formData.color || 'bg-white',
+          startTime: formData.startTime,
+          endTime: formData.endTime,
+          children: []
+        };
+        dispatchWorkspaceUpdate(prev => {
+          const nextTimelines = prev.timelines.map(tl => {
+            if (tl.id !== prev.activeTimelineId) return tl;
+            return { ...tl, treeData: addNodeToTree(tl.treeData, modalState.parentNodeId, newNode) };
+          });
+          const nextMaster = Array.from(new Set([...(prev.masterFeatures || []), ...(formData.features || [])]));
+          return { ...prev, timelines: nextTimelines, masterFeatures: nextMaster };
+        });
+        closeModal();
+        showToast(`分岐「${trimmedTitle}」を追加しました`);
+      };
+
+      const handleAddFromStockInModal = (stock) => {
+        if (!modalState.parentNodeId) return;
+        const parentInfo = flatActiveNodes.find(n => n.id === modalState.parentNodeId);
+        const startTime = parentInfo?.endTime || '09:30';
+        const endTime = minutesToTime(timeToMinutes(startTime) + (stock.durationMin || 30));
+
+        const newNode = {
+          id: generateId('node'),
+          title: stock.title,
+          description: stock.description || '',
+          features: parseFeatures(stock.features),
+          aiWith: stock.aiWith || '',
+          aiWithout: stock.aiWithout || '',
+          color: stock.color || 'bg-white',
+          startTime,
+          endTime,
+          children: []
+        };
+
+        dispatchTreeUpdate(prev => addNodeToTree(prev, modalState.parentNodeId, newNode));
+        closeModal();
+        showToast(`ストック「${stock.title}」を分岐に追加しました`);
       };
 
       const handleEditClick = (node) => {
         const currentFeatures = parseFeatures(node.features || node.feature);
         modalHistoryRecordedRef.current = false;
+        setFormError('');
         setFormData({
-          title: node.title,
+          title: node.title || '',
           description: node.description || '',
           features: currentFeatures,
           newFeatureText: '',
@@ -1996,10 +2042,18 @@
           endTime: node.endTime || '09:30'
         });
         setFeatureTab('registered');
-        setModalState({ isOpen: true, type: 'edit', targetNodeId: node.id });
+        setModalState({ isOpen: true, type: 'edit', targetNodeId: node.id, parentNodeId: null });
       };
 
-      const handleDeleteClick = (nodeId) => setModalState({ isOpen: true, type: 'delete', targetNodeId: nodeId });
+      const handleCloseEditModal = () => {
+        if (modalState.type === 'edit' && !formData.title.trim()) {
+          setFormError('タイトルを入力してください。');
+          return;
+        }
+        closeModal();
+      };
+
+      const handleDeleteClick = (nodeId) => setModalState({ isOpen: true, type: 'delete', targetNodeId: nodeId, parentNodeId: null });
 
       const handleConfirmDelete = () => {
         if (modalState.targetNodeId) {
@@ -2097,9 +2151,12 @@
         if (panState) setPanState(null);
       };
 
-      const closeModal = () => setModalState({ isOpen: false, type: '', targetNodeId: null });
+      const closeModal = () => {
+        setFormError('');
+        setModalState({ isOpen: false, type: '', targetNodeId: null, parentNodeId: null });
+      };
 
-      // === PART 2 END (この直下にパート3を貼り付けてください) ===
+      // === PART 2 END (この直下にPart 3を貼り付けてください) ===
     if (!isAuthenticated) {
         return <LoginScreen onAuthenticated={() => setIsAuthenticated(true)} />;
       }
@@ -2203,7 +2260,7 @@
                 >
                   <TagIcon />
                   <span>活用機能</span>
-                  <span className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.2 rounded-full">
+                  <span className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded-full leading-none">
                     {registeredFeatures.length}
                   </span>
                 </button>
@@ -2217,7 +2274,7 @@
                 >
                   <BookmarkIcon />
                   <span>ストック</span>
-                  <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.2 rounded-full">
+                  <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full leading-none">
                     {situationStocks.length}
                   </span>
                 </button>
@@ -3194,7 +3251,7 @@
             </div>
           )}
 
-          {/* 3. 分岐の編集 / 削除モーダル */}
+          {/* 3. 分岐の追加 / 編集 / 削除モーダル */}
           {modalState.isOpen && (
             <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4 select-text">
               <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6">
@@ -3217,275 +3274,413 @@
                   <div className="space-y-4">
                     <div className="flex justify-between items-center pb-3 border-b border-slate-100">
                       <div>
-                        <h2 className="text-base font-bold text-slate-800">分岐タスクの編集</h2>
+                        <h2 className="text-base font-bold text-slate-800">
+                          {modalState.type === 'add' ? '分岐タスクの追加' : '分岐タスクの編集'}
+                        </h2>
                         <span className="text-[10px] text-emerald-600 font-semibold">
-                          ✓ 入力内容はリアルタイムに自動保存・同期されます
+                          {modalState.type === 'add'
+                            ? '新規作成またはストックから選んで追加できます'
+                            : '✓ 入力内容はリアルタイムに自動保存・同期されます'}
                         </span>
                       </div>
-                      <button type="button" onClick={closeModal} className="text-slate-400 hover:text-slate-600 text-lg leading-none">
+                      <button
+                        type="button"
+                        onClick={modalState.type === 'edit' ? handleCloseEditModal : closeModal}
+                        className="text-slate-400 hover:text-slate-600 text-lg leading-none"
+                      >
                         &times;
                       </button>
                     </div>
 
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 mb-1">タイトル</label>
-                      <input
-                        type="text"
-                        value={formData.title}
-                        onChange={(e) => updateFormAndAutoSave({ title: e.target.value })}
-                        placeholder="例: ルートA：仕事編"
-                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-xs font-bold text-slate-700 mb-1">開始時間</label>
-                        <input
-                          type="time"
-                          value={formData.startTime}
-                          onChange={(e) => updateFormAndAutoSave({ startTime: e.target.value })}
-                          className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        />
+                    {/* 新規追加時のみ：新規作成 / ストックから追加 タブ */}
+                    {modalState.type === 'add' && (
+                      <div className="grid grid-cols-2 gap-1.5 bg-slate-100 p-1 rounded-xl border border-slate-200">
+                        <button
+                          type="button"
+                          onClick={() => setAddModalTab('new')}
+                          className={`py-1.5 rounded-lg text-xs font-bold transition-all ${
+                            addModalTab === 'new'
+                              ? 'bg-white text-slate-900 shadow-sm'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          ＋ 新規作成
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAddModalTab('stock')}
+                          className={`py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+                            addModalTab === 'stock'
+                              ? 'bg-white text-emerald-700 shadow-sm'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          <BookmarkIcon />
+                          <span>ストックから追加 ({situationStocks.length})</span>
+                        </button>
                       </div>
-                      <div>
-                        <label className="block text-xs font-bold text-slate-700 mb-1">終了時間</label>
-                        <input
-                          type="time"
-                          value={formData.endTime}
-                          onChange={(e) => updateFormAndAutoSave({ endTime: e.target.value })}
-                          className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        />
-                      </div>
-                    </div>
+                    )}
 
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 mb-1">概要・シチュエーション説明</label>
-                      <textarea
-                        rows={2}
-                        value={formData.description}
-                        onChange={(e) => updateFormAndAutoSave({ description: e.target.value })}
-                        placeholder="この分岐の前提条件や状況を入力"
-                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    </div>
-
-                    <div className="space-y-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
-                      <div>
-                        <label className="block text-xs font-bold text-emerald-700 mb-1">🟢 AIがある場合の文章 (〇〇さん)</label>
-                        <textarea
-                          rows={2}
-                          value={formData.aiWith}
-                          onChange={(e) => updateFormAndAutoSave({ aiWith: e.target.value })}
-                          placeholder="AI機能を活用してスムーズに完了するシナリオを入力"
-                          className="w-full px-3 py-2 border border-emerald-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-bold text-rose-700 mb-1">🔴 AIがない場合の文章 (××さん)</label>
-                        <textarea
-                          rows={2}
-                          value={formData.aiWithout}
-                          onChange={(e) => updateFormAndAutoSave({ aiWithout: e.target.value })}
-                          placeholder="手動操作で手間や時間がかかるシナリオを入力"
-                          className="w-full px-3 py-2 border border-rose-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-rose-500 bg-white"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-xs font-bold text-slate-700">活用機能の登録</label>
-                        <div className="flex border border-slate-200 rounded-md p-0.5 bg-slate-50 text-[11px]">
-                          <button
-                            type="button"
-                            onClick={() => setFeatureTab('registered')}
-                            className={`px-2 py-0.5 rounded font-bold transition-colors ${
-                              featureTab === 'registered' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'
-                            }`}
-                          >
-                            登録済みから選択
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setFeatureTab('new')}
-                            className={`px-2 py-0.5 rounded font-bold transition-colors ${
-                              featureTab === 'new' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'
-                            }`}
-                          >
-                            ＋ 新規入力
-                          </button>
-                        </div>
-                      </div>
-
-                      {featureTab === 'registered' ? (
-                        <div className="bg-slate-50 border border-slate-200 p-2.5 rounded-lg max-h-36 overflow-y-auto space-y-1">
-                          {registeredFeatures.length === 0 ? (
-                            <p className="text-[11px] text-slate-400 text-center py-2">
-                              登録済みの機能はありません。「活用機能」タブまたは「新規入力」から追加してください。
+                    {/* ストックから追加タブの内容 */}
+                    {modalState.type === 'add' && addModalTab === 'stock' ? (
+                      <div className="space-y-3">
+                        {situationStocks.length === 0 ? (
+                          <div className="bg-slate-50 border border-dashed border-slate-300 rounded-xl p-8 text-center">
+                            <p className="text-xs font-bold text-slate-600 mb-1">シチュエーションストックがありません</p>
+                            <p className="text-[11px] text-slate-400">
+                              上部メニューの「ストック」タブからよく使うシチュエーションを登録しておくと、ここからすぐ追加できます。
                             </p>
-                          ) : (
-                            registeredFeatures.map((feat) => {
-                              const isSelected = formData.features.includes(feat);
-                              const isEditingThis = editingFeatureName === feat;
-
+                          </div>
+                        ) : (
+                          <div className="space-y-2.5 max-h-[55vh] overflow-y-auto pr-1">
+                            {situationStocks.map(stock => {
+                              const feats = parseFeatures(stock.features);
                               return (
-                                <div key={feat} className="flex items-center justify-between gap-2 py-0.5">
-                                  {isEditingThis ? (
-                                    <div className="flex items-center gap-1 flex-1">
-                                      <input
-                                        type="text"
-                                        value={newFeatureNameInput}
-                                        onChange={(e) => setNewFeatureNameInput(e.target.value)}
-                                        className="px-2 py-0.5 border border-indigo-400 rounded text-xs flex-1"
-                                      />
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          if (newFeatureNameInput.trim()) {
-                                            const trimmed = newFeatureNameInput.trim();
-                                            handleRenameMasterFeature(feat, trimmed);
-                                            updateFormAndAutoSave({
-                                              features: formData.features.map(f => f === feat ? trimmed : f)
-                                            });
-                                          }
-                                          setEditingFeatureName(null);
-                                        }}
-                                        className="text-[10px] bg-indigo-600 text-white px-2 py-0.5 rounded font-bold"
-                                      >
-                                        保存
-                                      </button>
+                                <div
+                                  key={stock.id}
+                                  className={`rounded-xl border border-slate-200 p-3.5 ${stock.color || 'bg-white'} hover:border-emerald-400 transition-colors`}
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0 flex-1">
+                                      <h3 className="text-xs font-extrabold text-slate-800">{stock.title}</h3>
+                                      <span className="inline-block mt-0.5 text-[10px] font-mono text-slate-500">
+                                        目安: {stock.durationMin || 30}分
+                                      </span>
                                     </div>
-                                  ) : (
-                                    <>
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          const nextFeatures = isSelected
-                                            ? formData.features.filter(f => f !== feat)
-                                            : [...formData.features, feat];
-                                          updateFormAndAutoSave({ features: nextFeatures });
-                                        }}
-                                        className={`text-left text-xs px-2.5 py-1 rounded-md flex-1 font-medium transition-colors ${
-                                          isSelected
-                                            ? 'bg-indigo-600 text-white font-bold'
-                                            : 'bg-white hover:bg-slate-200 border border-slate-200 text-slate-700'
-                                        }`}
-                                      >
-                                        {isSelected ? '✓ ' : '+ '}{feat}
-                                      </button>
-
-                                      <div className="flex items-center gap-1">
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setEditingFeatureName(feat);
-                                            setNewFeatureNameInput(feat);
-                                          }}
-                                          className="p-1 hover:bg-slate-200 rounded text-slate-500"
-                                          title="機能名を編集"
-                                        >
-                                          <EditIcon />
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            handleDeleteMasterFeature(feat);
-                                            updateFormAndAutoSave({
-                                              features: formData.features.filter(f => f !== feat)
-                                            });
-                                          }}
-                                          className="p-1 hover:bg-red-100 rounded text-red-500"
-                                          title="登録機能一覧から完全削除"
-                                        >
-                                          <TrashIcon />
-                                        </button>
-                                      </div>
-                                    </>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleAddFromStockInModal(stock)}
+                                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold rounded-lg shrink-0 shadow-sm transition-colors flex items-center gap-1"
+                                    >
+                                      <PlusIcon />
+                                      <span>追加</span>
+                                    </button>
+                                  </div>
+                                  {stock.description && (
+                                    <p className="text-[11px] text-slate-600 mt-1.5 line-clamp-2 whitespace-pre-wrap">
+                                      {stock.description}
+                                    </p>
+                                  )}
+                                  {feats.length > 0 && (
+                                    <div className="flex flex-wrap gap-1 mt-2">
+                                      {feats.map((f, idx) => (
+                                        <span key={idx} className="px-1.5 py-0.5 bg-indigo-50 border border-indigo-200/60 text-indigo-700 text-[10px] font-semibold rounded">
+                                          {f}
+                                        </span>
+                                      ))}
+                                    </div>
                                   )}
                                 </div>
                               );
-                            })
-                          )}
+                            })}
+                          </div>
+                        )}
+
+                        <div className="flex justify-end pt-3 border-t border-slate-100">
+                          <button
+                            type="button"
+                            onClick={closeModal}
+                            className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg"
+                          >
+                            キャンセル
+                          </button>
                         </div>
-                      ) : (
+                      </div>
+                    ) : (
+                      /* 新規作成フォーム / 編集フォーム */
+                      <>
                         <div>
+                          <label className="block text-xs font-bold text-slate-700 mb-1">
+                            タイトル <span className="text-rose-500">*必須</span>
+                          </label>
                           <input
                             type="text"
-                            value={formData.newFeatureText}
-                            onChange={(e) => setFormData({ ...formData, newFeatureText: e.target.value })}
-                            placeholder="例: かこって検索, AI音声入力 (カンマ区切りで複数可)"
+                            value={formData.title}
+                            onChange={(e) => updateFormAndAutoSave({ title: e.target.value })}
+                            placeholder="例: ルートA：仕事編"
+                            autoFocus
+                            className={`w-full px-3 py-2 border rounded-lg text-xs focus:outline-none focus:ring-2 ${
+                              formError
+                                ? 'border-rose-400 focus:ring-rose-500 bg-rose-50/40'
+                                : 'border-slate-300 focus:ring-blue-500'
+                            }`}
+                          />
+                          {formError && (
+                            <p className="mt-1.5 text-xs font-bold text-rose-600 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1.5">
+                              ⚠ {formError}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-bold text-slate-700 mb-1">開始時間</label>
+                            <input
+                              type="time"
+                              value={formData.startTime}
+                              onChange={(e) => updateFormAndAutoSave({ startTime: e.target.value })}
+                              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-700 mb-1">終了時間</label>
+                            <input
+                              type="time"
+                              value={formData.endTime}
+                              onChange={(e) => updateFormAndAutoSave({ endTime: e.target.value })}
+                              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-700 mb-1">概要・シチュエーション説明</label>
+                          <textarea
+                            rows={2}
+                            value={formData.description}
+                            onChange={(e) => updateFormAndAutoSave({ description: e.target.value })}
+                            placeholder="この分岐の前提条件や状況を入力"
                             className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
                           />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const added = parseFeatures(formData.newFeatureText);
-                              if (added.length > 0) {
-                                const merged = Array.from(new Set([...formData.features, ...added]));
-                                updateFormAndAutoSave({
-                                  features: merged,
-                                  newFeatureText: ''
-                                });
-                                setFeatureTab('registered');
-                              }
-                            }}
-                            className="mt-1.5 w-full py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-md text-xs font-bold border border-indigo-200 transition-colors"
-                          >
-                            機能タグを追加（自動保存）
-                          </button>
                         </div>
-                      )}
 
-                      {formData.features.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-2">
-                          <span className="text-[10px] text-slate-400 self-center">選択中:</span>
-                          {formData.features.map((f, idx) => (
-                            <span key={idx} className="bg-indigo-100 text-indigo-800 text-[10px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
-                              {f}
+                        <div className="space-y-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                          <div>
+                            <label className="block text-xs font-bold text-emerald-700 mb-1">🟢 AIがある場合の文章 (〇〇さん)</label>
+                            <textarea
+                              rows={2}
+                              value={formData.aiWith}
+                              onChange={(e) => updateFormAndAutoSave({ aiWith: e.target.value })}
+                              placeholder="AI機能を活用してスムーズに完了するシナリオを入力"
+                              className="w-full px-3 py-2 border border-emerald-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-xs font-bold text-rose-700 mb-1">🔴 AIがない場合の文章 (××さん)</label>
+                            <textarea
+                              rows={2}
+                              value={formData.aiWithout}
+                              onChange={(e) => updateFormAndAutoSave({ aiWithout: e.target.value })}
+                              placeholder="手動操作で手間や時間がかかるシナリオを入力"
+                              className="w-full px-3 py-2 border border-rose-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-rose-500 bg-white"
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <label className="text-xs font-bold text-slate-700">活用機能の登録</label>
+                            <div className="flex border border-slate-200 rounded-md p-0.5 bg-slate-50 text-[11px]">
                               <button
                                 type="button"
-                                onClick={() => updateFormAndAutoSave({ features: formData.features.filter(item => item !== f) })}
-                                className="hover:text-red-600"
+                                onClick={() => setFeatureTab('registered')}
+                                className={`px-2 py-0.5 rounded font-bold transition-colors ${
+                                  featureTab === 'registered' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'
+                                }`}
                               >
-                                &times;
+                                登録済みから選択
                               </button>
-                            </span>
-                          ))}
+                              <button
+                                type="button"
+                                onClick={() => setFeatureTab('new')}
+                                className={`px-2 py-0.5 rounded font-bold transition-colors ${
+                                  featureTab === 'new' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'
+                                }`}
+                              >
+                                ＋ 新規入力
+                              </button>
+                            </div>
+                          </div>
+
+                          {featureTab === 'registered' ? (
+                            <div className="bg-slate-50 border border-slate-200 p-2.5 rounded-lg max-h-36 overflow-y-auto space-y-1">
+                              {registeredFeatures.length === 0 ? (
+                                <p className="text-[11px] text-slate-400 text-center py-2">
+                                  登録済みの機能はありません。「活用機能」タブまたは「新規入力」から追加してください。
+                                </p>
+                              ) : (
+                                registeredFeatures.map((feat) => {
+                                  const isSelected = formData.features.includes(feat);
+                                  const isEditingThis = editingFeatureName === feat;
+
+                                  return (
+                                    <div key={feat} className="flex items-center justify-between gap-2 py-0.5">
+                                      {isEditingThis ? (
+                                        <div className="flex items-center gap-1 flex-1">
+                                          <input
+                                            type="text"
+                                            value={newFeatureNameInput}
+                                            onChange={(e) => setNewFeatureNameInput(e.target.value)}
+                                            className="px-2 py-0.5 border border-indigo-400 rounded text-xs flex-1"
+                                          />
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              if (newFeatureNameInput.trim()) {
+                                                const trimmed = newFeatureNameInput.trim();
+                                                handleRenameMasterFeature(feat, trimmed);
+                                                updateFormAndAutoSave({
+                                                  features: formData.features.map(f => f === feat ? trimmed : f)
+                                                });
+                                              }
+                                              setEditingFeatureName(null);
+                                            }}
+                                            className="text-[10px] bg-indigo-600 text-white px-2 py-0.5 rounded font-bold"
+                                          >
+                                            保存
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              const nextFeatures = isSelected
+                                                ? formData.features.filter(f => f !== feat)
+                                                : [...formData.features, feat];
+                                              updateFormAndAutoSave({ features: nextFeatures });
+                                            }}
+                                            className={`text-left text-xs px-2.5 py-1 rounded-md flex-1 font-medium transition-colors ${
+                                              isSelected
+                                                ? 'bg-indigo-600 text-white font-bold'
+                                                : 'bg-white hover:bg-slate-200 border border-slate-200 text-slate-700'
+                                            }`}
+                                          >
+                                            {isSelected ? '✓ ' : '+ '}{feat}
+                                          </button>
+
+                                          <div className="flex items-center gap-1">
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setEditingFeatureName(feat);
+                                                setNewFeatureNameInput(feat);
+                                              }}
+                                              className="p-1 hover:bg-slate-200 rounded text-slate-500"
+                                              title="機能名を編集"
+                                            >
+                                              <EditIcon />
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                handleDeleteMasterFeature(feat);
+                                                updateFormAndAutoSave({
+                                                  features: formData.features.filter(f => f !== feat)
+                                                });
+                                              }}
+                                              className="p-1 hover:bg-red-100 rounded text-red-500"
+                                              title="登録機能一覧から完全削除"
+                                            >
+                                              <TrashIcon />
+                                            </button>
+                                          </div>
+                                        </>
+                                      )}
+                                    </div>
+                                  );
+                                })
+                              )}
+                            </div>
+                          ) : (
+                            <div>
+                              <input
+                                type="text"
+                                value={formData.newFeatureText}
+                                onChange={(e) => setFormData({ ...formData, newFeatureText: e.target.value })}
+                                placeholder="例: かこって検索, AI音声入力 (カンマ区切りで複数可)"
+                                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const added = parseFeatures(formData.newFeatureText);
+                                  if (added.length > 0) {
+                                    const merged = Array.from(new Set([...formData.features, ...added]));
+                                    updateFormAndAutoSave({
+                                      features: merged,
+                                      newFeatureText: ''
+                                    });
+                                    setFeatureTab('registered');
+                                  }
+                                }}
+                                className="mt-1.5 w-full py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-md text-xs font-bold border border-indigo-200 transition-colors"
+                              >
+                                機能タグを追加
+                              </button>
+                            </div>
+                          )}
+
+                          {formData.features.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-2">
+                              <span className="text-[10px] text-slate-400 self-center">選択中:</span>
+                              {formData.features.map((f, idx) => (
+                                <span key={idx} className="bg-indigo-100 text-indigo-800 text-[10px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                                  {f}
+                                  <button
+                                    type="button"
+                                    onClick={() => updateFormAndAutoSave({ features: formData.features.filter(item => item !== f) })}
+                                    className="hover:text-red-600"
+                                  >
+                                    &times;
+                                  </button>
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </div>
 
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 mb-1">カードテーマカラー</label>
-                      <div className="grid grid-cols-3 gap-2">
-                        {colorOptions.map((opt) => (
-                          <button
-                            key={opt.value}
-                            type="button"
-                            onClick={() => updateFormAndAutoSave({ color: opt.value })}
-                            className={`py-1.5 px-2 rounded-lg text-xs font-bold border transition-all ${opt.value} ${
-                              formData.color === opt.value
-                                ? 'border-blue-600 ring-2 ring-blue-500/20 text-blue-900'
-                                : 'border-slate-200 text-slate-700 hover:border-slate-300'
-                            }`}
-                          >
-                            {opt.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-700 mb-1">カードテーマカラー</label>
+                          <div className="grid grid-cols-3 gap-2">
+                            {colorOptions.map((opt) => (
+                              <button
+                                key={opt.value}
+                                type="button"
+                                onClick={() => updateFormAndAutoSave({ color: opt.value })}
+                                className={`py-1.5 px-2 rounded-lg text-xs font-bold border transition-all ${opt.value} ${
+                                  formData.color === opt.value
+                                    ? 'border-blue-600 ring-2 ring-blue-500/20 text-blue-900'
+                                    : 'border-slate-200 text-slate-700 hover:border-slate-300'
+                                }`}
+                              >
+                                {opt.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
 
-                    <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
-                      <button
-                        type="button"
-                        onClick={closeModal}
-                        className="px-5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-colors"
-                      >
-                        完了（閉じる）
-                      </button>
-                    </div>
+                        <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                          {modalState.type === 'add' ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={closeModal}
+                                className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                              >
+                                キャンセル
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleConfirmAdd}
+                                className="px-5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-colors"
+                              >
+                                分岐を追加する
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={handleCloseEditModal}
+                              className="px-5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-colors"
+                            >
+                              完了（閉じる）
+                            </button>
+                          )}
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
